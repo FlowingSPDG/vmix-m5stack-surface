@@ -412,7 +412,7 @@ boolean connectTovMix() {
     Serial.println("Awaiting WiFi connection...");
     count++;
     sprite->printf("WiFi failed(%d) retry...\n", count);
-    delay(1000);
+    delay(3000);
     sprite->pushSprite(0, 0);
     if (count > 20) {
       vmix_connecting = false;
@@ -441,6 +441,7 @@ boolean connectTovMix() {
   client->println("SUBSCRIBE TALLY");
   client->println("SUBSCRIBE ACTS");
   vmix_connecting = false;
+  showTallyScreen();
   return true;
 }
 
@@ -849,8 +850,6 @@ public:
         Serial.println("vMix not connected on update frame. Connecting...");
         if (!connectTovMix()) {
           showSettingsQRCode();
-        }else {
-          showTallyScreen();
         }
       }
       
