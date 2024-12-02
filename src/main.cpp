@@ -1,0 +1,757 @@
+#include <M5Unified.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <DNSServer.h>
+#include <ArxSmartPtr.h>
+#include <TaskManager.h>
+#include <Preferences.h>
+#include <PinButton.h>
+#include <WebServer.h>
+#include <stdio.h>
+#include <string>
+
+// types...
+enum class Screen {
+  TALLY,
+  NETWORK,
+  SETTINGS,
+  AP,
+  _,
+  TALLY_SET
+};
+
+enum class Mode {
+  TALLY,
+  ACTS,
+};
+
+enum Tally {
+  SAFE,
+  PGM,
+  PRV,
+};
+
+class BatteryManager : public Task::Base {
+  M5Canvas canvas;
+
+  int8_t getBatteryLevel() {
+    return M5.Power.getBatteryLevel();
+  }
+
+  void drawBattery(int8_t battery_level){
+    M5.Lcd.drawRect(280,8,26,14,WHITE);
+    M5.Lcd.drawRect(305,11,4,8,WHITE);
+    switch(battery_level){
+      case 100: M5.Lcd.fillRect(282,10,22,10,WHITE);
+      case 75: M5.Lcd.fillRect(282,10,17,10,WHITE);
+      case 50: M5.Lcd.fillRect(282,10,12,10,WHITE);
+      case 25: M5.Lcd.fillRect(282,10,7,10,WHITE);
+      case 0: M5.Lcd.fillRect(282,10,2,10,WHITE);
+    }
+  }
+
+public:
+  BatteryManager(const String& name)
+    : Task::Base(name) {}
+
+  virtual ~BatteryManager() {}
+
+  BatteryManager* Sprite(M5Canvas canvas) {
+    canvas = canvas;
+    return this;
+  }
+
+  virtual void update() override {
+    auto battery_level = getBatteryLevel();
+    drawBattery(battery_level);
+  }
+
+  void redraw() {
+    update();
+  }
+};
+
+class Engine : public Task::Base {
+  // buttons
+  PinButton btnA;
+  PinButton btnB;
+  PinButton btnC;
+
+  // WiFi(client)
+  String WIFI_SSID;
+  String WIFI_PASS;
+  // WiFi(server)
+  String ssid_prefix = "vt-";
+  String ssid = "";
+  String password;
+  // HTTP Header
+  String header;
+
+  // state
+  bool vmix_connected = false;
+  Screen currentState;
+  Tally currentTally = Tally::SAFE;
+  int tally_target = 0;
+
+  // Instances
+  DNSServer *dnsServer = NULL;
+  WiFiClient client;
+  WebServer server;  // Object of WebServer(HTTP port, 80 is default)
+  BatteryManager batteryManager;
+  std::shared_ptr<M5Canvas> sprite;
+
+  // settings
+  Preferences preferences;
+  Mode mode = Mode::ACTS;
+  String VMIX_IP = "192.168.1.10";
+  int VMIX_PORT = 8099;
+  String ACTS_EVENT = "InputPreview";
+  int ACTS_EVENT_NR = 1;
+  int ACTS_EVENT_TARGET = 1;
+
+
+  // methods
+  String generateRandomString(int length = 8) {
+    const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    String randomString = "";
+
+    // Generate random lowercase letters
+    for (int i = 0; i < length; i++) {
+      randomString += letters[random(0, sizeof(letters))];
+    }
+
+    return randomString;
+  }
+
+  // Clear LCD Screen
+  void clearLCD() {
+    sprite->fillScreen(TFT_BLACK);
+    sprite->setCursor(0, 0);
+  }
+
+  // buttons
+  void printBtnA(String s){
+    sprite->setCursor(40, 220);
+    sprite->print(s);
+  }
+  void printBtnB(String s){
+    sprite->setCursor(155, 220);
+    sprite->print(s);
+  }
+  void printBtnC(String s){
+    sprite->setCursor(250, 220);
+    sprite->print(s);
+  }
+
+  // utility functions
+  Tally parseTallyInt(char c) {
+  switch (c) {
+    case '0':
+      return Tally::SAFE;
+    case '1':
+      return Tally::PGM;
+    case '2':
+      return Tally::PRV;
+    default:
+      return Tally::SAFE;
+    }
+  };
+
+  void handleRoot() {
+    server.send(200, "text/plain", "Hello from esp32!");
+  }
+
+  // Handle Tally State
+  void displayTallyState(uint16_t bgcolor, uint16_t color, int x, int y, String state){
+    sprite->fillScreen(bgcolor);
+    sprite->setTextColor(color, bgcolor);
+    sprite->setCursor(x, y);
+    sprite->println(state);
+  }
+
+  // Menus
+  // Show the current network settings
+  void showNetworkScreen() {
+    Serial.println("Showing Network screen");
+    currentState = Screen::NETWORK;
+    clearLCD();
+    sprite->fillScreen(TFT_BLACK);
+    sprite->setTextSize(2);
+    sprite->setTextColor(WHITE, BLACK);
+    sprite->println();
+    sprite->printf("SSID: %s\n", &(WIFI_SSID[0]));
+    sprite->printf("IP Address: %s\n", WiFi.localIP().toString());
+    sprite->printf("Camera Num: %d\n", tally_target);
+    printBtnA("BACK");
+  }
+
+  void showSettingsQRCode() {
+    Serial.println("Showing Settings QR Code");
+    currentState = Screen::SETTINGS;
+    clearLCD();
+    sprite->fillScreen(TFT_BLACK);
+    sprite->setTextSize(2);
+    sprite->setTextColor(WHITE, BLACK);
+    sprite->println();
+    sprite->println("Starting WIFI AP...");
+    sprite->pushSprite(0, 0);
+
+    // TODO: Split method / destructor
+    Serial.printf("Starting WiFi. SSID:%s, Password:%s\n", ssid, password);
+    if (!WiFi.softAP(ssid, password)) {
+      sprite->println("failed to start WiFi AP");
+      return;
+    }
+
+    Serial.println("Starting Web Server...");
+    server.begin();
+
+    sprite->println("Scan QR Code to configure");
+    sprite->println("DO NOT CLOSE THIS PAGE!");
+    
+    delay(300);
+    IPAddress local_IP(192, 168, 4,22);  // Manually set the ip address of the open network. 手动设置的开启的网络的ip地址
+    IPAddress gateway(192, 168, 4,9);  // Manually set gateway IP address. 手动设置的网关IP地址
+    IPAddress subnet(255, 255, 255,0);  // Manually set subnet mask. 手动设置的子网掩码
+    if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
+        sprite->println("WiFi AP configuration failed");
+        return;
+    };
+    sprite->printf("IP: %s\n", local_IP.toString());
+
+    Serial.printf("Starting DNS Server. IP:%s Port:%d\n", WiFi.softAPIP().toString(), 53);
+    dnsServer = new DNSServer();
+    if (!dnsServer->start(53, "*", WiFi.softAPIP())) {
+      sprite->println("failed to start DNS Server");
+      return;
+    }
+
+    char buf[61];
+    auto qr = sprintf(buf, "WIFI:T:WPA;S:%s;P:%s;H:false;;", ssid, password);
+    Serial.printf("QR Code: %s\n", buf);
+    sprite->println();
+    sprite->println();
+    // 表示位置: 中央=(画面横幅/2)-(QRコードの幅/2)
+    auto width = sprite->width()/3;
+    sprite->qrcode(buf, 0, (sprite->width()/2)-(width/2), width, 3);
+    printBtnA("CANCEL");
+  }
+
+  void showTallyScreen() {
+    clearLCD();
+    Serial.println("Showing Tally Screen");
+
+    currentState = Screen::TALLY;
+    sprite->setTextSize(10);
+    switch (currentTally) {
+      case 0:
+        displayTallyState(BLACK,WHITE,73,95,"SAFE");
+        break;
+      case 1:
+        displayTallyState(RED,WHITE,90,95,"PGM");
+        break;
+      case 2:
+        displayTallyState(GREEN,BLACK,90,95,"PRV");
+        break;
+      default:
+        displayTallyState(BLACK,WHITE,73,95,"UNKNOWN");
+    }
+    sprite->setTextSize(2);
+    sprite->setCursor(10,10);
+    String camera = "CAMERA: " + (String)(tally_target);
+    sprite->println(camera);
+  }
+
+  void showTallySetScreen() {
+    Serial.println("Showing Tally Set Screen");
+    currentState = Screen::TALLY_SET;
+
+    sprite->fillScreen(TFT_BLACK);
+    sprite->setTextSize(2);
+    sprite->setTextColor(WHITE, BLACK);
+    sprite->setCursor(20,20);
+    sprite->printf("Current Target: %d\n", tally_target);
+    sprite->setCursor(20,60);
+
+    printBtnA("OK");
+    printBtnB("-");
+    printBtnC("+");
+  }
+
+  
+//void connectTovMix(){
+//    if ((VMIX_IP != "")){ // && (wifi_connected == true)) {
+//      connectTovMix();
+//    } else {
+//      showSettingsScreen();
+//    }
+//  
+//}
+
+void loadWiFiPreferences(){
+  Serial.println("load preferences");
+  String wifi_ssid;
+  String wifi_pass;
+  
+  preferences.begin("vMixTally", false);
+  
+  wifi_ssid = preferences.getString("wifi_ssid");
+  wifi_pass = preferences.getString("wifi_pass");
+  preferences.end();
+}
+void loadvMixPreferences(){
+  int tally_nr;
+  String vmix_ip;
+  
+  preferences.begin("vMixTally", false);
+
+  tally_nr = preferences.getUInt("tally");
+  vmix_ip = preferences.getString("vmix_ip");
+  preferences.end();  
+}
+
+void saveWiFiPreferences(String wifi_ssid, String wifi_pass){
+  preferences.begin("vMixTally", false);
+  if(wifi_ssid != ""){
+    preferences.putString("wifi_ssid", &(WIFI_SSID[0]));
+    preferences.putString("wifi_pass", &(WIFI_PASS[0]));
+  }
+  preferences.end();
+}
+void savevMixPreferences(){
+//  preferences.begin("vMixTally", false);
+//  if(tally != "") {
+//    TALLY_NR =  std::atoi(tally.c_str());  
+//    preferences.putUInt("tally", TALLY_NR);
+//  }
+//  if(server.arg("ssid") != ""){
+//    WIFI_SSID = server.arg("ssid");  
+//    WIFI_PASS = server.arg("pwd");
+//    preferences.putString("wifi_ssid", &(WIFI_SSID[0]));
+//    preferences.putString("wifi_pass", &(WIFI_PASS[0]));
+//  }
+//  if(server.arg("vmixip") != ""){
+//    VMIX_IP = server.arg("vmixip");  
+//    preferences.putString("vmix_ip", &(VMIX_IP[0]));
+//  }
+//  preferences.end();
+}
+
+// Connect to vMix instance
+boolean connectTovMix() {
+  clearLCD();
+  sprite->println("Connecting to vMix...");
+
+  if (client.connect(&(VMIX_IP[0]),VMIX_PORT))
+  {
+    vmix_connected = true;
+    sprite->println("Connected to vMix!");
+    Serial.println("------------");
+
+    // Subscribe to the tally events
+    client.println("SUBSCRIBE TALLY");
+    client.println("SUBSCRIBE ACTS");
+    showTallyScreen();
+    return true;
+  }
+  char tryCount = 0;
+  clearLCD();
+  sprite->println("Could not connect to vMix");
+  sprite->println("Retrying: 0/3");
+  boolean retry = false;
+  for (int i = 0; i < 3; i++)
+  {
+    Serial.print(i);
+    retry = retryConnectionvMix(i);
+    if (!retry) {
+      vmix_connected = true;
+      return true;
+    }
+  }
+  clearLCD();
+  sprite->println("Couldn't connect to vMix");
+  sprite->println();
+  sprite->println("Please restart device");
+  sprite->println("to retry");
+  return false;
+}
+
+boolean retryConnectionvMix(int tryCount) {
+  clearLCD();
+  sprite->println("Couldn't connect to vMix");
+  sprite->printf("Retrying: %d/3\n", tryCount);
+  delay(2000);
+  boolean conn = connectTovMix();
+  if (conn) {
+    return false;
+  }
+  return true;
+}
+
+  
+
+// Handle incoming data
+void handleData(String data) {
+  // Check if server data is tally data
+  if (data.indexOf("TALLY OK") == 0) {
+    // Pick the state of the current tally
+    auto newState = parseTallyInt(data.charAt(tally_target -1 + 8));
+    Serial.printf("newState: %c\n", newState);
+    currentTally = newState;
+    
+    if (mode != Mode::TALLY) {
+      return;
+    }
+    
+    if (currentState == Screen::TALLY) {
+      showTallyScreen();
+    }
+  }
+
+  // Check if server data is ACTS data
+  else if (data.indexOf("ACTS OK") == 0) {
+    Serial.printf("EVENT(RAW): ",data);
+    Serial.print(data);
+    Serial.println();
+
+    // Throw away first 8 characters(ACTS OK )
+    data = data.substring(8);
+
+    int spaceIndex = data.indexOf(" ");
+    String event = data.substring(0, spaceIndex);
+    Serial.printf("event:%s ", &(event[0]));
+
+    auto remainingData = data.substring(spaceIndex + 1, data.length());
+    spaceIndex = remainingData.indexOf(" ");
+    int input = remainingData.substring(0, spaceIndex).toInt();
+    Serial.printf("input:%d ", input);
+
+    remainingData = remainingData.substring(spaceIndex + 1, remainingData.length());
+    int target = remainingData.toInt();
+    Serial.printf("target:%d\n", target);
+
+    // Ignore if the event is not the one we are looking for
+    if (event != ACTS_EVENT || input != ACTS_EVENT_NR) {
+      return;
+    }
+
+    // If the event is the same as the one we are looking for
+    if (mode != Mode::ACTS) {
+      return;
+    }
+
+    Serial.printf("Apply ACTS Tally for target: %d\n", target);
+    if (currentState == Screen::TALLY) {
+      if (target == ACTS_EVENT_TARGET) {
+        showTallyScreen();
+        return;
+      }
+      showTallyScreen();
+    }
+  }
+  else {
+    Serial.print("Response from vMix: ");
+    Serial.println(data);
+  }
+}
+
+void showMsg(const char* msg){
+  clearLCD();
+  sprite->setTextSize(1);
+  sprite->setTextColor(WHITE,BLACK);
+  sprite->fillScreen(BLACK);
+  sprite->println(msg);
+}
+
+void showTallyNum(String msg){
+  clearLCD();
+  sprite->setTextSize(5);
+  sprite->setTextColor(WHITE,BLACK);
+  sprite->fillScreen(BLACK);
+  sprite->println(msg);
+}
+
+void showSettingsScreen() {
+  Serial.println("Showing Settings screen");
+  currentState = Screen::SETTINGS;
+  clearLCD();
+
+  preferences.begin("vMixTally", false);
+  
+  sprite->fillScreen(TFT_BLACK);
+  sprite->setTextSize(2);
+  sprite->setTextColor(WHITE, BLACK);
+  sprite->println("Settings");
+  
+  sprite->println();
+  sprite->println();
+  sprite->println("vMix");
+  sprite->printf("  IP: %s\n", preferences.getString("vmix_ip"));
+  sprite->printf("  CAMERA: %d\n", preferences.getUInt("tally"));
+  // sprite->printf("  STATUS: %d\n", preferences.getUInt("tally")); // CONNECTED
+  sprite->println();
+  
+  sprite->println("Network");
+  sprite->printf("  SSID: %s\n", preferences.getString("wifi_ssid")); 
+  sprite->printf("  Password: %s\n", preferences.getString("wifi_pass"));
+  // sprite->printf("  STATUS: %d\n", preferences.getUInt("tally")); // CONNECTED
+  sprite->println();
+  
+  preferences.end();
+
+  printBtnA("BACK");
+  printBtnC("EDIT");
+}
+
+void showAPScreen() {
+  Serial.println("Showing Access Point Screen");
+  currentState = Screen::AP;
+  clearLCD();
+
+  sprite->fillScreen(TFT_BLACK);
+  sprite->setTextSize(2);
+  sprite->setTextColor(WHITE, BLACK);
+  sprite->setCursor(10,20);
+  sprite->println("Unable to connect to WiFi");
+  sprite->println();
+  sprite->println("Please connect to:");
+  sprite->println();
+  sprite->println("SSID: vMix-M5tack-Tally");
+  sprite->println("Pwd: 12345678");
+  sprite->println();
+  sprite->println("Open http://192.168.4.1 \n in a browser and \n configure your WiFi");
+  sprite->println();
+}
+
+void updateTallyNR(int tally){
+  preferences.begin("vMixTally", false);
+  if(tally >= 1) {
+    tally_target =  tally;  
+    preferences.putUInt("tally", tally_target);
+  }
+  preferences.end();
+}
+
+
+
+public:
+    Engine(const String& name)
+    : Task::Base(name), btnA(0), btnB(0), btnC(0), batteryManager("Battery") {
+        Serial.printf("heap_caps_get_free_size(MALLOC_CAP_DMA):%d\n", heap_caps_get_free_size(MALLOC_CAP_DMA) );
+        Serial.printf("heap_caps_get_largest_free_block(MALLOC_CAP_DMA):%d\n", heap_caps_get_largest_free_block(MALLOC_CAP_DMA) );
+        
+        currentState = Screen::TALLY;
+  
+        Serial.println("beginning preferences...");
+        preferences.begin("vMixTally", false);
+        String ssid = preferences.getString("wifi_ssid");
+
+        // TODO: WIFI AP
+
+        tally_target = preferences.getUInt("tally");
+        VMIX_IP = preferences.getString("vmix_ip");
+
+        preferences.end();
+        Serial.println("finished preferences...");
+    }
+
+    virtual ~Engine() {}
+
+    // method chain
+    Engine* ButtonA(const PinButton button) {
+        btnA = button;
+        return this;
+    }
+    Engine* ButtonB(const PinButton button) {
+        btnB = button;
+        return this;
+    }
+    Engine* ButtonC(const PinButton button) {
+        btnC = button;
+        return this;
+    }
+    Engine* SetSprite(const std::shared_ptr<M5Canvas> lcd) {
+        sprite = lcd;
+        return this;
+    }
+    Engine* SetScreen(int w, int h) {
+        Serial.printf("Initializing sprite... width:%d, height:%d\n", w, h);
+        sprite->setColorDepth(8);
+        void *p = sprite->createSprite(w, h);
+        if ( p == NULL ) {
+          Serial.println("メモリが足りなくて確保できない");
+        }
+        return this;
+    }
+
+    virtual void enter() override {
+        // WIFI settings
+        ssid = generateRandomString(12);
+        password = generateRandomString(12);
+        Serial.printf("Generated SSID:%s password:%s\n", ssid, password);
+
+        // HTTP Server
+        static const char responsePortal[] = R"===(
+<!DOCTYPE html><html><head><title>ESP32 CaptivePortal</title></head><body>
+<h1>Hello World!</h1><p>This is a captive portal example page. All unknown http requests will
+be redirected here.</p></body></html>
+)===";
+        server.on("/hotspot-detect.html", [&]() {
+          server.send(200, "text/html", responsePortal);
+        });
+        server.on("/generate_204", [&]() {
+          server.send(200, "text/html", responsePortal);
+        });
+        server.on("/portal", [&]() {
+          server.send(200, "text/html", responsePortal);
+        });
+        server.onNotFound([&]() {
+          server.sendHeader("Location", "/portal");
+          server.send(302, "text/plain", "redirect to captive portal");
+        });
+        
+        sprite->fillScreen(TFT_BLACK);
+        sprite->setTextSize(2);
+        sprite->println("Initialized Engine...");
+        sprite->pushSprite(0, 0);
+        delay(1000);
+
+        sprite->clear();
+        sprite->fillScreen(TFT_BLACK);
+        sprite->printf("CPU: %d MHz\n", getCpuFrequencyMhz());
+        sprite->pushSprite(0, 0);
+        delay(1000);
+
+        Serial.println("STARTING...");
+        showTallyScreen();
+        sprite->pushSprite(0, 0);
+        delay(3000);
+    }
+
+    virtual void update() override {
+      bool shouldPushSprite = false;
+      // update buttons
+      btnA.update();
+      btnB.update();
+      btnC.update();
+
+      if (dnsServer != NULL) {
+        dnsServer->processNextRequest();
+      }
+
+      switch(currentState) {
+        case Screen::TALLY:
+          if (btnA.isClick()) {
+            showTallySetScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+
+          if (btnB.isClick()) {
+            showSettingsScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+
+          if (btnC.isClick()) {
+            showNetworkScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+
+          break;
+        case Screen::SETTINGS:
+          if (btnA.isClick()) {
+            showTallyScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+
+          if (btnC.isClick()) {
+            showSettingsQRCode();
+            shouldPushSprite = true;
+          }
+
+          break;
+        case Screen::AP:
+          if (btnA.isClick()) {
+            showTallyScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+          
+          break;
+        case Screen::NETWORK:
+          if (btnA.isClick()) {
+            showTallyScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+          
+          break;
+        case Screen::TALLY_SET:
+          if (btnA.isClick()) {
+            showTallyScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+
+          if (btnB.isClick()) {
+            updateTallyNR(tally_target - 1);
+            showTallySetScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+
+          if (btnC.isClick()) {
+            updateTallyNR(tally_target + 1);
+            showTallySetScreen();
+            batteryManager.redraw();
+            shouldPushSprite = true;
+          }
+          break;
+      }
+      
+      // handle WIFI server/client connection
+      // TODO: Task
+      server.handleClient();  
+      if(client.available()) {
+        String data = client.readStringUntil('\r\n');
+        handleData(data);
+      }
+
+      if(shouldPushSprite) {
+        sprite->pushSprite(0, 0);
+      }
+    }
+};
+
+void setup() {
+  // begin
+  Serial.begin(115200);
+  setCpuFrequencyMhz(240);
+  auto cfg = M5.config();
+  M5.begin(cfg);
+  
+  // configure buttons
+  PinButton btnA(39);
+  PinButton btnB(38);
+  PinButton btnC(37);
+
+/*
+  Tasks.add<BatteryManager>("Battery")->
+    Sprite(&canvas)->
+    startFps(1);
+*/
+
+
+  auto display = std::make_shared<M5Canvas>(&M5.Lcd);
+  Tasks.add<Engine>("Engine")->
+    ButtonA(btnA)->ButtonB(btnB)->ButtonC(btnC)->
+    SetSprite(display)->SetScreen(M5.Lcd.width(), M5.Lcd.height())->
+    startFps(60);
+}
+
+void loop() {
+  Tasks.update();
+}
