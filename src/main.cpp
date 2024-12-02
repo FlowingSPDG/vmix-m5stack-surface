@@ -95,9 +95,9 @@ class Engine : public Task::Base {
   int current_input = 0; // only available in ACTS mode or XML API
 
   // Instances
-  DNSServer *dnsServer = NULL;
-  WiFiClient *client = NULL;
-  WebServer *server = NULL;  // Object of WebServer(HTTP port, 80 is default)
+  DNSServer dnsServer;
+  WiFiClient client;
+  WebServer server;
   BatteryManager batteryManager;
   std::shared_ptr<M5Canvas> sprite;
 
@@ -198,52 +198,10 @@ class Engine : public Task::Base {
     sprite->pushSprite(0, 0);
 
     // TODO: Split method / destructor
-    Serial.printf("Starting WiFi. SSID:%s, Password:%s\n", ssid, password);
-    WiFi.softAPdisconnect(true);
-    vmix_connected = false;
-    if ((!WiFi.mode(WIFI_AP)) || (!WiFi.softAP(ssid, password))) {
-      sprite->println("failed to start WiFi AP");
-      return;
-    }
-
-    Serial.println("Starting Web server...");
-    server = new WebServer(80);
-    // HTTP Server
-    server->on("/hotspot-detect.html", [&]() {
-      handleCaptivePortal();
-    });
-    server->on("/generate_204", [&]() {
-      handleCaptivePortal();
-    });
-    server->on("/portal", [&]() {
-      handleCaptivePortal();
-    });
-    server->onNotFound([&]() {
-      server->sendHeader("Location", "/portal");
-      server->send(302, "text/plain", "redirect to captive portal");
-    });
-    server->begin();
 
     sprite->println("Scan QR Code to configure");
     sprite->println("DO NOT CLOSE THIS PAGE!");
     sprite->println("WARNING: This connection is NOT secure!!(http)");
-    
-    delay(300);
-    IPAddress local_IP(192, 168, 4,22);  // Manually set the ip address of the open network. 手动设置的开启的网络的ip地址
-    IPAddress gateway(192, 168, 4,9);  // Manually set gateway IP address. 手动设置的网关IP地址
-    IPAddress subnet(255, 255, 255,0);  // Manually set subnet mask. 手动设置的子网掩码
-    if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
-        sprite->println("WiFi AP configuration failed");
-        return;
-    };
-    sprite->printf("IP: %s\n", local_IP.toString());
-
-    Serial.printf("Starting DNS server. IP:%s Port:%d\n", WiFi.softAPIP().toString(), 53);
-    dnsServer = new DNSServer();
-    if (!dnsServer->start(53, "*", WiFi.softAPIP())) {
-      sprite->println("failed to start DNS Server");
-      return;
-    }
 
     char buf[61];
     auto qr = sprintf(buf, "WIFI:T:WPA;S:%s;P:%s;H:false;;", ssid, password);
@@ -366,14 +324,14 @@ void savevMixPreferences(){
 //    TALLY_NR =  std::atoi(tally.c_str());  
 //    preferences.putUInt("tally", TALLY_NR);
 //  }
-//  if(server->arg("ssid") != ""){
-//    WIFI_SSID = server->arg("ssid");  
-//    WIFI_PASS = server->arg("pwd");
+//  if(server.arg("ssid") != ""){
+//    WIFI_SSID = server.arg("ssid");  
+//    WIFI_PASS = server.arg("pwd");
 //    preferences.putString("wifi_ssid", &(WIFI_SSID[0]));
 //    preferences.putString("wifi_pass", &(WIFI_PASS[0]));
 //  }
-//  if(server->arg("vmixip") != ""){
-//    VMIX_IP = server->arg("vmixip");  
+//  if(server.arg("vmixip") != ""){
+//    VMIX_IP = server.arg("vmixip");  
 //    preferences.putString("vmix_ip", &(VMIX_IP[0]));
 //  }
 //  preferences.end();
@@ -393,20 +351,7 @@ boolean connectTovMix() {
   sprite->println("Connecting to vMix...");
 
   preferences.begin("vMixTally", true);
-  auto VMIX_IP = preferences.getString("vmix_ip"); 
-  auto WIFI_SSID = preferences.getString("wifi_ssid");
-  auto WIFI_PASS = preferences.getString("wifi_pass");
-  Serial.printf("Connecting to vMix. IP: %s\n", VMIX_IP);
-  preferences.end();
-  delete server;
-  client = new WiFiClient();
-  if (WIFI_SSID == "" || WIFI_PASS == "" || VMIX_IP == "") {
-    vmix_connecting = false;
-    return false;
-  }
-  Serial.printf("Starting WiFi connection. SSID:%s PW:%s", WIFI_SSID, WIFI_PASS);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID.c_str(), WIFI_PASS.c_str());
+  
   int count = 0;
   while (WiFi.status() != WL_CONNECTED) {
     Serial.println("Awaiting WiFi connection...");
@@ -422,7 +367,8 @@ boolean connectTovMix() {
   Serial.println("Connected to WiFi!");
   count = 0;
 
-  while (!client->connect(VMIX_IP.c_str(),VMIX_PORT)) {
+  auto VMIX_IP = preferences.getString("vmix_ip"); 
+  while (!client.connect(VMIX_IP.c_str(),VMIX_PORT)) {
     Serial.println("failed to connect vMix. Retrying...");
     count++;
     sprite->printf("vMix Connection failed(%d) retry...\n", count);
@@ -438,9 +384,10 @@ boolean connectTovMix() {
   Serial.println("------------");
 
   // Subscribe to the tally events
-  client->println("SUBSCRIBE TALLY");
-  client->println("SUBSCRIBE ACTS");
+  client.println("SUBSCRIBE TALLY");
+  client.println("SUBSCRIBE ACTS");
   vmix_connecting = false;
+  preferences.end();
   showTallyScreen();
   return true;
 }
@@ -728,14 +675,65 @@ public:
       data["wifi_password"] = preferences.getString("wifi_pass");
       preferences.end();
       auto resp = ministache::render(captivePortalTemplateHTML, data);
-      server->send(200, "text/html", resp);
+      server.send(200, "text/html", resp);
     }
 
     virtual void enter() override {
+        preferences.begin("vMixTally", true);
         // WIFI settings
+        WiFi.mode(WIFI_MODE_APSTA);
         ssid = generateRandomString(12);
         password = generateRandomString(20);
         Serial.printf("Generated SSID:%s password:%s\n", ssid, password);
+        
+        auto WIFI_SSID = preferences.getString("wifi_ssid");
+        auto WIFI_PASS = preferences.getString("wifi_pass");
+        auto VMIX_IP = preferences.getString("vmix_ip"); 
+        Serial.printf("Connecting to vMix. IP: %s\n", VMIX_IP);
+        preferences.end();
+        if (WIFI_SSID == "" || WIFI_PASS == "" || VMIX_IP == "") {
+          showSettingsQRCode();
+          return;
+        }
+        Serial.printf("Starting WiFi connection. SSID:%s PW:%s", WIFI_SSID, WIFI_PASS);
+        WiFi.begin(WIFI_SSID.c_str(), WIFI_PASS.c_str());
+        Serial.printf("Starting WiFi. SSID:%s, Password:%s\n", ssid, password);
+        if (!WiFi.softAP(ssid, password)) {
+          sprite->println("failed to start WiFi AP");
+          return;
+        }
+        delay(300);
+        IPAddress local_IP(192, 168, 4,22);  // Manually set the ip address of the open network. 手动设置的开启的网络的ip地址
+        IPAddress gateway(192, 168, 4,9);  // Manually set gateway IP address. 手动设置的网关IP地址
+        IPAddress subnet(255, 255, 255,0);  // Manually set subnet mask. 手动设置的子网掩码
+        if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
+            sprite->println("WiFi AP configuration failed");
+            return;
+        };
+        sprite->printf("IP: %s\n", local_IP.toString());
+    
+        Serial.printf("Starting DNS server. IP:%s Port:%d\n", WiFi.softAPIP().toString(), 53);
+        if (!dnsServer.start(53, "*", WiFi.softAPIP())) {
+          sprite->println("failed to start DNS Server");
+          return;
+        }
+    
+        Serial.println("Starting Web server...");
+        // HTTP Server
+        server.on("/hotspot-detect.html", [&]() {
+          handleCaptivePortal();
+        });
+        server.on("/generate_204", [&]() {
+          handleCaptivePortal();
+        });
+        server.on("/portal", [&]() {
+          handleCaptivePortal();
+        });
+        server.onNotFound([&]() {
+          server.sendHeader("Location", "/portal");
+          server.send(302, "text/plain", "redirect to captive portal");
+        });
+        server.begin();
 
         sprite->fillScreen(TFT_BLACK);
         sprite->setTextSize(2);
@@ -763,9 +761,7 @@ public:
       btnB.update();
       btnC.update();
 
-      if (dnsServer != NULL) {
-        dnsServer->processNextRequest();
-      }
+      dnsServer.processNextRequest();
 
       switch(currentState) {
         case Screen::TALLY:
@@ -855,15 +851,11 @@ public:
       
       // handle WIFI server/client connection
       // TODO: Task
-      if (server != NULL) {
-        server->handleClient();  
-      }
+      server.handleClient();  
 
-      if (client != NULL) {
-        if(client->available()) {
-          String data = client->readStringUntil('\r\n');
-          handleData(data);
-        }
+      if(client.available()) {
+        String data = client.readStringUntil('\r\n');
+        handleData(data);
       }
 
       if(shouldPushSprite) {
