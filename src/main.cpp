@@ -30,6 +30,7 @@ enum Tally {
   SAFE,
   PGM,
   PRV,
+  UNKNOWN,
 };
 
 class BatteryManager : public Task::Base {
@@ -89,7 +90,7 @@ class Engine : public Task::Base {
   bool vmix_connected = false;
   bool vmix_connecting = false;
   Screen currentState;
-  Tally currentTally = Tally::SAFE;
+  Tally currentTally = Tally::UNKNOWN;
   int tally_target = 0;
   int current_input = 0; // only available in ACTS mode or XML API
 
@@ -134,11 +135,11 @@ class Engine : public Task::Base {
     sprite->print(s);
   }
   void printBtnB(String s){
-    sprite->setCursor(155, 220);
+    sprite->setCursor(145, 220);
     sprite->print(s);
   }
   void printBtnC(String s){
-    sprite->setCursor(250, 220);
+    sprite->setCursor(240, 220);
     sprite->print(s);
   }
 
@@ -152,7 +153,7 @@ class Engine : public Task::Base {
       case '2':
         return Tally::PRV;
       default:
-        return Tally::SAFE;
+        return Tally::UNKNOWN;
     }
   };
 
@@ -278,23 +279,27 @@ class Engine : public Task::Base {
     sprite->setTextSize(10);
     switch (currentTally) {
       case SAFE:
-        displayTallyState(BLACK,WHITE,70,95,"SAFE");
+        displayTallyState(BLACK,WHITE,70,90,"SAFE");
         break;
       case PGM:
-        displayTallyState(RED,WHITE,90,95,"PGM");
+        displayTallyState(RED,WHITE,90,90,"PGM");
         break;
       case PRV:
-        displayTallyState(GREEN,BLACK,90,95,"PRV");
+        displayTallyState(GREEN,BLACK,90,90,"PRV");
+        break;
+      case UNKNOWN:
+        displayTallyState(BLACK,WHITE,80,90,"?");
         break;
       default:
-        displayTallyState(BLACK,WHITE,60,95,"UNKNOWN");
+        displayTallyState(BLACK,WHITE,80,90,"?");
     }
     sprite->setTextSize(2);
-    sprite->setCursor(10,10);
-    sprite->printf("CAMERA: %d\n", tally_target);
-    sprite->printf("Current: %d\n", current_input);
+    sprite->setCursor(0, 0);
+    sprite->printf("TARGET: %d\n", tally_target);
+    sprite->printf("ACTIVE: %d\n", current_input);
+    sprite->printf("MODE: %s\n", mode == Mode::TALLY ? "TALLY" : "ACTS");
     printBtnA("TALLY");
-    printBtnB("NETWRK");
+    printBtnB("SET");
     printBtnC("WIFI");
     sprite->pushSprite(0, 0);
   }
@@ -307,7 +312,7 @@ class Engine : public Task::Base {
     sprite->setTextSize(2);
     sprite->setTextColor(WHITE, BLACK);
     sprite->setCursor(20,20);
-    sprite->printf("Current Target: %d\n", current_input);
+    sprite->printf("Current Target: %d\n", tally_target);
     sprite->setCursor(20,60);
 
     printBtnA("OK");
@@ -820,6 +825,7 @@ public:
 
           if (btnB.isClick()) {
             updateTallyNR(tally_target - 1);
+            currentTally = Tally::UNKNOWN;
             showTallySetScreen();
             batteryManager.redraw();
             shouldPushSprite = true;
@@ -827,6 +833,7 @@ public:
 
           if (btnC.isClick()) {
             updateTallyNR(tally_target + 1);
+            currentTally = Tally::UNKNOWN;
             showTallySetScreen();
             batteryManager.redraw();
             shouldPushSprite = true;
