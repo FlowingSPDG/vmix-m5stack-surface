@@ -81,8 +81,8 @@ class Engine : public Task::Base {
 
   // WiFi(server)
   String ssid_prefix = "vt-";
-  String ssid = "";
-  String password;
+  char ssid[12] = "";
+  char password[20] = "";
   // HTTP Header
   String header;
 
@@ -111,17 +111,17 @@ class Engine : public Task::Base {
 
 
   // methods
-  String generateRandomString(int length = 8) {
-    const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    String randomString = "";
+  template <size_t N>
+  void generateRandomString(char (&buffer)[N]) {
+      const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      const size_t lettersCount = sizeof(letters) - 1; // ヌル文字を除外
 
-    // Generate random lowercase letters
-    while (randomString.length() < length) {
-      randomString += letters[random(0, sizeof(letters))];
-    }
-
-    return randomString;
+      for (size_t i = 0; i < N - 1; i++) { // 終端文字を除く
+          buffer[i] = letters[random(0, lettersCount)];
+      }
+      buffer[N - 1] = '\0'; // 終端文字を追加
   }
+
 
   // Clear LCD Screen
   void clearLCD() {
@@ -194,14 +194,11 @@ class Engine : public Task::Base {
     sprite->setTextSize(2);
     sprite->setTextColor(WHITE, BLACK);
     sprite->println();
-    sprite->println("Starting WIFI AP...");
+    sprite->println("Scan QR Code to configure");
+    sprite->printf("  SSID:%s\n PW:%s\n", ssid, password);
     sprite->pushSprite(0, 0);
 
     // TODO: Split method / destructor
-
-    sprite->println("Scan QR Code to configure");
-    sprite->println("DO NOT CLOSE THIS PAGE!");
-    sprite->println("WARNING: This connection is NOT secure!!(http)");
 
     char buf[61];
     auto qr = sprintf(buf, "WIFI:T:WPA;S:%s;P:%s;H:false;;", ssid, password);
@@ -211,7 +208,7 @@ class Engine : public Task::Base {
     // 表示位置: 中央=(画面横幅/2)-(QRコードの幅/2)
     auto width = sprite->width()/3;
     sprite->qrcode(buf, 0, (sprite->width()/2)-(width/2), width, 3);
-    printBtnA("CANCEL");
+    printBtnA("BACK");
   }
 
   void showTallyScreen() {
@@ -682,8 +679,8 @@ public:
         preferences.begin("vMixTally", true);
         // WIFI settings
         WiFi.mode(WIFI_MODE_APSTA);
-        ssid = generateRandomString(12);
-        password = generateRandomString(20);
+        generateRandomString(ssid);
+        generateRandomString(password);
         Serial.printf("Generated SSID:%s password:%s\n", ssid, password);
         
         auto WIFI_SSID = preferences.getString("wifi_ssid");
@@ -711,7 +708,7 @@ public:
             return;
         };
         sprite->printf("IP: %s\n", local_IP.toString());
-    
+
         Serial.printf("Starting DNS server. IP:%s Port:%d\n", WiFi.softAPIP().toString(), 53);
         if (!dnsServer.start(53, "*", WiFi.softAPIP())) {
           sprite->println("failed to start DNS Server");
