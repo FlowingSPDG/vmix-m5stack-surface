@@ -16,6 +16,7 @@ enum class Screen {
   TALLY,
   NETWORK,
   SETTINGS,
+  SETTINGS_QR,
   AP,
   _,
   TALLY_SET
@@ -34,21 +35,21 @@ enum Tally {
 };
 
 class BatteryManager : public Task::Base {
-  M5Canvas canvas;
+  std::shared_ptr<M5Canvas> sprite;
 
   int8_t getBatteryLevel() {
     return M5.Power.getBatteryLevel();
   }
 
   void drawBattery(int8_t battery_level){
-    M5.Lcd.drawRect(280,8,26,14,WHITE);
-    M5.Lcd.drawRect(305,11,4,8,WHITE);
+    sprite->drawRect(280,8,26,14,WHITE);
+    sprite->drawRect(305,11,4,8,WHITE);
     switch(battery_level){
-      case 100: M5.Lcd.fillRect(282,10,22,10,WHITE);
-      case 75: M5.Lcd.fillRect(282,10,17,10,WHITE);
-      case 50: M5.Lcd.fillRect(282,10,12,10,WHITE);
-      case 25: M5.Lcd.fillRect(282,10,7,10,WHITE);
-      case 0: M5.Lcd.fillRect(282,10,2,10,WHITE);
+      case 100: sprite->fillRect(282,10,22,10,WHITE);
+      case 75: sprite->fillRect(282,10,17,10,WHITE);
+      case 50: sprite->fillRect(282,10,12,10,WHITE);
+      case 25: sprite->fillRect(282,10,7,10,WHITE);
+      case 0: sprite->fillRect(282,10,2,10,WHITE);
     }
   }
 
@@ -58,9 +59,18 @@ public:
 
   virtual ~BatteryManager() {}
 
-  BatteryManager* Sprite(M5Canvas canvas) {
-    canvas = canvas;
+  BatteryManager* Sprite(const std::shared_ptr<M5Canvas> lcd) {
+    sprite = lcd;
     return this;
+  }
+  BatteryManager* Screen(int w, int h) {
+      Serial.printf("Initializing sprite... width:%d, height:%d\n", w, h);
+      sprite->setColorDepth(8);
+      void *p = sprite->createSprite(w, h);
+      if ( p == NULL ) {
+        Serial.println("メモリが足りなくて確保できない");
+      }
+      return this;
   }
 
   virtual void update() override {
@@ -98,7 +108,6 @@ class Engine : public Task::Base {
   DNSServer dnsServer;
   WiFiClient client;
   WebServer server;
-  BatteryManager batteryManager;
   std::shared_ptr<M5Canvas> sprite;
 
   // settings
@@ -188,7 +197,7 @@ class Engine : public Task::Base {
       return;
     }
     Serial.println("Showing Settings QR Code");
-    currentState = Screen::SETTINGS;
+    currentState = Screen::SETTINGS_QR;
     clearLCD();
     sprite->fillScreen(TFT_BLACK);
     sprite->setTextSize(2);
@@ -208,6 +217,7 @@ class Engine : public Task::Base {
     // 表示位置: 中央=(画面横幅/2)-(QRコードの幅/2)
     auto width = sprite->width()/3;
     sprite->qrcode(buf, 0, (sprite->width()/2)-(width/2), width, 3);
+    sprite->pushSprite(0, 0);
     printBtnA("BACK");
   }
 
@@ -275,66 +285,9 @@ class Engine : public Task::Base {
     printBtnC("+");
   }
 
-  
-//void connectTovMix(){
-//    if ((VMIX_IP != "")){ // && (wifi_connected == true)) {
-//      connectTovMix();
-//    } else {
-//      showSettingsScreen();
-//    }
-//  
-//}
 
-void loadWiFiPreferences(){
-  Serial.println("load preferences");
-  String wifi_ssid;
-  String wifi_pass;
-  
-  preferences.begin("vMixTally", false);
-  
-  wifi_ssid = preferences.getString("wifi_ssid");
-  wifi_pass = preferences.getString("wifi_pass");
-  preferences.end();
-}
-void loadvMixPreferences(){
-  int tally_nr;
-  String vmix_ip;
-  
-  preferences.begin("vMixTally", false);
-
-  tally_nr = preferences.getUInt("tally");
-  vmix_ip = preferences.getString("vmix_ip");
-  preferences.end();  
-}
-
-void saveWiFiPreferences(String wifi_ssid, String wifi_pass){
-  preferences.begin("vMixTally", false);
-  if(wifi_ssid != ""){
-    preferences.putString("wifi_ssid", wifi_ssid);
-    preferences.putString("wifi_pass", wifi_pass);
-  }
-  preferences.end();
-}
-void savevMixPreferences(){
-//  preferences.begin("vMixTally", false);
-//  if(tally != "") {
-//    TALLY_NR =  std::atoi(tally.c_str());  
-//    preferences.putUInt("tally", TALLY_NR);
-//  }
-//  if(server.arg("ssid") != ""){
-//    WIFI_SSID = server.arg("ssid");  
-//    WIFI_PASS = server.arg("pwd");
-//    preferences.putString("wifi_ssid", &(WIFI_SSID[0]));
-//    preferences.putString("wifi_pass", &(WIFI_PASS[0]));
-//  }
-//  if(server.arg("vmixip") != ""){
-//    VMIX_IP = server.arg("vmixip");  
-//    preferences.putString("vmix_ip", &(VMIX_IP[0]));
-//  }
-//  preferences.end();
-}
-
-// Connect to vMix instance
+// Connect to vMix instance. return true and show Tally screen if success.
+// return false if failed to connect. screen will not change.
 boolean connectTovMix() {
   if (vmix_connecting) {
     return false;
@@ -351,22 +304,22 @@ boolean connectTovMix() {
   
   int count = 0;
   while (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Awaiting WiFi connection...");
-    count++;
-    sprite->printf("WiFi failed(%d) retry...\n", count);
-    delay(3000);
-    sprite->pushSprite(0, 0);
     if (count > 20) {
       vmix_connecting = false;
       return false;
     }
+    Serial.println("Awaiting WiFi connection...");
+    count++;
+    sprite->printf("WiFi failed(%d) retry...\n", count);
+    sprite->pushSprite(0, 0);
+    delay(3000);
   }
   Serial.println("Connected to WiFi!");
   count = 0;
 
   auto VMIX_IP = preferences.getString("vmix_ip"); 
-  while (!client.connect(VMIX_IP.c_str(),VMIX_PORT)) {
-    Serial.println("failed to connect vMix. Retrying...");
+  while (0 == client.connect(VMIX_IP.c_str(),VMIX_PORT)) {
+    Serial.printf("failed to connect vMix. at %s. Retrying...\n", VMIX_IP);
     count++;
     sprite->printf("vMix Connection failed(%d) retry...\n", count);
     delay(1000);
@@ -495,26 +448,6 @@ void showSettingsScreen() {
   printBtnC("EDIT");
 }
 
-void showAPScreen() {
-  Serial.println("Showing Access Point Screen");
-  currentState = Screen::AP;
-  clearLCD();
-
-  sprite->fillScreen(TFT_BLACK);
-  sprite->setTextSize(2);
-  sprite->setTextColor(WHITE, BLACK);
-  sprite->setCursor(10,20);
-  sprite->println("Unable to connect to WiFi");
-  sprite->println();
-  sprite->println("Please connect to:");
-  sprite->println();
-  sprite->println("SSID: vMix-M5tack-Tally");
-  sprite->println("Pwd: 12345678");
-  sprite->println();
-  sprite->println("Open http://192.168.4.1 \n in a browser and \n configure your WiFi");
-  sprite->println();
-}
-
 void updateTallyNR(int tally){
   preferences.begin("vMixTally", false);
   if(tally >= 1) {
@@ -524,11 +457,9 @@ void updateTallyNR(int tally){
   preferences.end();
 }
 
-
-
 public:
     Engine(const String& name)
-    : Task::Base(name), btnA(0), btnB(0), btnC(0), batteryManager("Battery") {
+    : Task::Base(name), btnA(0), btnB(0), btnC(0) {
         currentState = Screen::TALLY;
   
         Serial.println("beginning preferences...");
@@ -559,11 +490,8 @@ public:
         btnC = button;
         return this;
     }
-    Engine* SetSprite(const std::shared_ptr<M5Canvas> lcd) {
+    Engine* Sprite(const std::shared_ptr<M5Canvas> lcd, int w, int h) {
         sprite = lcd;
-        return this;
-    }
-    Engine* SetScreen(int w, int h) {
         Serial.printf("Initializing sprite... width:%d, height:%d\n", w, h);
         sprite->setColorDepth(8);
         void *p = sprite->createSprite(w, h);
@@ -643,16 +571,11 @@ public:
         <h1>M5Stack Control Panel</h1>
     </header>
 
-    <!-- vMix Configuration Form -->
-    <form action="/vmix" method="POST">
+    <form action="/settings" method="POST">
         <h2>vMix Configuration</h2>
         <label for="vmix-ip">IP Address</label>
         <input type="text" id="vmix-ip" name="ip" placeholder="Enter IP address" value="{{vmix_ip}}" required>
-        <button type="submit">Submit</button>
-    </form>
 
-    <!-- Wi-Fi Configuration Form -->
-    <form action="/wifi" method="POST">
         <h2>Wi-Fi Configuration</h2>
         <label for="wifi-ssid">SSID</label>
         <input type="text" id="wifi-ssid" name="ssid" placeholder="Enter SSID" value="{{wifi_ssid}}" required>
@@ -676,18 +599,19 @@ public:
     }
 
     virtual void enter() override {
-        preferences.begin("vMixTally", true);
         // WIFI settings
         WiFi.mode(WIFI_MODE_APSTA);
         generateRandomString(ssid);
         generateRandomString(password);
         Serial.printf("Generated SSID:%s password:%s\n", ssid, password);
         
+        preferences.begin("vMixTally", true);
         auto WIFI_SSID = preferences.getString("wifi_ssid");
         auto WIFI_PASS = preferences.getString("wifi_pass");
         auto VMIX_IP = preferences.getString("vmix_ip"); 
-        Serial.printf("Connecting to vMix. IP: %s\n", VMIX_IP);
         preferences.end();
+
+        Serial.printf("Connecting to vMix. IP: %s\n", VMIX_IP);
         if (WIFI_SSID == "" || WIFI_PASS == "" || VMIX_IP == "") {
           showSettingsQRCode();
           return;
@@ -700,9 +624,10 @@ public:
           return;
         }
         delay(300);
-        IPAddress local_IP(192, 168, 4,22);  // Manually set the ip address of the open network. 手动设置的开启的网络的ip地址
-        IPAddress gateway(192, 168, 4,9);  // Manually set gateway IP address. 手动设置的网关IP地址
-        IPAddress subnet(255, 255, 255,0);  // Manually set subnet mask. 手动设置的子网掩码
+        // Fixed IPs
+        IPAddress local_IP(192, 168, 4,22);
+        IPAddress gateway(192, 168, 4,9);  
+        IPAddress subnet(255, 255, 255,0); 
         if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
             sprite->println("WiFi AP configuration failed");
             return;
@@ -717,6 +642,8 @@ public:
     
         Serial.println("Starting Web server...");
         // HTTP Server
+
+        // captive portal...
         server.on("/hotspot-detect.html", [&]() {
           handleCaptivePortal();
         });
@@ -730,15 +657,22 @@ public:
           server.sendHeader("Location", "/portal");
           server.send(302, "text/plain", "redirect to captive portal");
         });
+
+        // APIs...
+        server.on("/settings", HTTP_POST, [&]() {
+          preferences.begin("vMixTally", false);
+          preferences.putString("vmix_ip", server.arg("ip"));
+          preferences.putString("wifi_ssid", server.arg("ssid"));
+          preferences.putString("wifi_pass", server.arg("password"));
+          preferences.end();
+          server.send(200, "text/plain", "Success");
+        });
         server.begin();
 
         sprite->fillScreen(TFT_BLACK);
         sprite->setTextSize(2);
         sprite->println("Initialized Engine...");
         sprite->pushSprite(0, 0);
-        delay(1000);
-
-        sprite->fillScreen(TFT_BLACK);
         sprite->printf("CPU: %d MHz\n", getCpuFrequencyMhz());
         sprite->pushSprite(0, 0);
         delay(1000);
@@ -764,19 +698,16 @@ public:
         case Screen::TALLY:
           if (btnA.isClick()) {
             showTallySetScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
 
           if (btnB.isClick()) {
             showSettingsScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
 
           if (btnC.isClick()) {
             showNetworkScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
 
@@ -784,7 +715,6 @@ public:
         case Screen::SETTINGS:
           if (btnA.isClick()) {
             showTallyScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
 
@@ -794,10 +724,17 @@ public:
           }
 
           break;
+
+        case Screen::SETTINGS_QR:
+          if (btnA.isClick()) {
+            showSettingsScreen();
+            shouldPushSprite = true;
+          }
+
+          return;
         case Screen::AP:
           if (btnA.isClick()) {
             showTallyScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
           
@@ -805,7 +742,6 @@ public:
         case Screen::NETWORK:
           if (btnA.isClick()) {
             showTallyScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
           
@@ -813,7 +749,6 @@ public:
         case Screen::TALLY_SET:
           if (btnA.isClick()) {
             showTallyScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
 
@@ -821,7 +756,6 @@ public:
             updateTallyNR(tally_target - 1);
             currentTally = Tally::UNKNOWN;
             showTallySetScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
 
@@ -829,7 +763,6 @@ public:
             updateTallyNR(tally_target + 1);
             currentTally = Tally::UNKNOWN;
             showTallySetScreen();
-            batteryManager.redraw();
             shouldPushSprite = true;
           }
           break;
@@ -883,7 +816,7 @@ void setup() {
   auto display = std::make_shared<M5Canvas>(&M5.Lcd);
   Tasks.add<Engine>("Engine")->
     ButtonA(btnA)->ButtonB(btnB)->ButtonC(btnC)->
-    SetSprite(display)->SetScreen(M5.Lcd.width(), M5.Lcd.height())->
+    Sprite(display, M5.Lcd.width(), M5.Lcd.height())->
     startFps(60);
 }
 
