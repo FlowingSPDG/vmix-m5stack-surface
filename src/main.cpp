@@ -692,6 +692,14 @@ public:
       btnB.update();
       btnC.update();
 
+      server.handleClient();
+      // handle WIFI server/client connection
+      // TODO: Task
+      if(client.available()) {
+        String data = client.readStringUntil('\r\n');
+        handleData(data);
+      }
+
       dnsServer.processNextRequest();
 
       switch(currentState) {
@@ -779,15 +787,6 @@ public:
         }
       }
       
-      // handle WIFI server/client connection
-      // TODO: Task
-      server.handleClient();  
-
-      if(client.available()) {
-        String data = client.readStringUntil('\r\n');
-        handleData(data);
-      }
-
       if(shouldPushSprite) {
         sprite->pushSprite(0, 0);
       }
