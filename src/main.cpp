@@ -34,55 +34,6 @@ enum Tally {
   UNKNOWN,
 };
 
-class BatteryManager : public Task::Base {
-  std::shared_ptr<M5Canvas> sprite;
-
-  int8_t getBatteryLevel() {
-    return M5.Power.getBatteryLevel();
-  }
-
-  void drawBattery(int8_t battery_level){
-    sprite->drawRect(280,8,26,14,WHITE);
-    sprite->drawRect(305,11,4,8,WHITE);
-    switch(battery_level){
-      case 100: sprite->fillRect(282,10,22,10,WHITE);
-      case 75: sprite->fillRect(282,10,17,10,WHITE);
-      case 50: sprite->fillRect(282,10,12,10,WHITE);
-      case 25: sprite->fillRect(282,10,7,10,WHITE);
-      case 0: sprite->fillRect(282,10,2,10,WHITE);
-    }
-  }
-
-public:
-  BatteryManager(const String& name)
-    : Task::Base(name) {}
-
-  virtual ~BatteryManager() {}
-
-  BatteryManager* Sprite(const std::shared_ptr<M5Canvas> lcd) {
-    sprite = lcd;
-    return this;
-  }
-  BatteryManager* Screen(int w, int h) {
-      Serial.printf("Initializing sprite... width:%d, height:%d\n", w, h);
-      sprite->setColorDepth(8);
-      void *p = sprite->createSprite(w, h);
-      if ( p == NULL ) {
-        Serial.println("メモリが足りなくて確保できない");
-      }
-      return this;
-  }
-
-  virtual void update() override {
-    auto battery_level = getBatteryLevel();
-    drawBattery(battery_level);
-  }
-
-  void redraw() {
-    update();
-  }
-};
-
 class Engine : public Task::Base {
   // buttons
   PinButton btnA;
@@ -304,7 +255,7 @@ boolean connectTovMix() {
   
   int count = 0;
   while (WiFi.status() != WL_CONNECTED) {
-    if (count > 20) {
+    if (count > 10) {
       vmix_connecting = false;
       return false;
     }
@@ -312,12 +263,13 @@ boolean connectTovMix() {
     count++;
     sprite->printf("WiFi failed(%d) retry...\n", count);
     sprite->pushSprite(0, 0);
-    delay(3000);
+    delay(5000);
   }
   Serial.println("Connected to WiFi!");
   count = 0;
 
   auto VMIX_IP = preferences.getString("vmix_ip"); 
+  preferences.end();
   while (0 == client.connect(VMIX_IP.c_str(),VMIX_PORT)) {
     Serial.printf("failed to connect vMix. at %s. Retrying...\n", VMIX_IP);
     count++;
@@ -337,7 +289,6 @@ boolean connectTovMix() {
   client.println("SUBSCRIBE TALLY");
   client.println("SUBSCRIBE ACTS");
   vmix_connecting = false;
-  preferences.end();
   showTallyScreen();
   return true;
 }
