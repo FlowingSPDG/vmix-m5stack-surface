@@ -69,7 +69,6 @@ class Engine : public Task::Base {
   int ACTS_EVENT_NR = 1;
   int ACTS_EVENT_TARGET = 1;
 
-
   // methods
   template <size_t N>
   void generateRandomString(char (&buffer)[N]) {
@@ -130,6 +129,8 @@ class Engine : public Task::Base {
   void showNetworkScreen() {
     preferences.begin("vMixTally", true);
     auto WIFI_SSID = preferences.getString("wifi_ssid", "");
+    preferences.end();
+
     Serial.println("Showing Network screen");
     currentState = Screen::NETWORK;
     clearLCD();
@@ -176,47 +177,47 @@ class Engine : public Task::Base {
     clearLCD();
     Serial.println("Showing Tally Screen");
 
-    if (!vmix_connected && !vmix_connecting) {
-      Serial.println("vMix not connected. Connecting...");
-      sprite->fillScreen(TFT_BLACK);
-      sprite->setTextSize(2);
-      sprite->setTextColor(WHITE, BLACK);
-      sprite->setCursor(10, 10);
-      sprite->println("Connecting to vMix...");
-      sprite->pushSprite(0, 0);
-      if (!connectTovMix()) {
-        showSettingsQRCode();
-        return;
-      };
+    if (!vmix_connected) {
       return;
     }
 
     currentState = Screen::TALLY;
     sprite->setTextSize(10);
-    switch (currentTally) {
-      case SAFE:
-        displayTallyState(BLACK,WHITE,70,90,"SAFE");
-        break;
-      case PGM:
-        displayTallyState(RED,WHITE,90,90,"PGM");
-        break;
-      case PRV:
-        displayTallyState(GREEN,BLACK,90,90,"PRV");
-        break;
-      case UNKNOWN:
-        displayTallyState(BLACK,WHITE,80,90,"?");
-        break;
-      default:
-        displayTallyState(BLACK,WHITE,80,90,"?");
+    if (mode == Mode::TALLY) {
+    Serial.println("Tally Mode");
+      switch (currentTally) {
+        case SAFE:
+          displayTallyState(BLACK,WHITE,70,90,"SAFE");
+          break;
+        case PGM:
+          displayTallyState(RED,WHITE,90,90,"PGM");
+          break;
+        case PRV:
+          displayTallyState(GREEN,BLACK,90,90,"PRV");
+          break;
+        case UNKNOWN:
+          displayTallyState(BLACK,WHITE,80,90,"?");
+          break;
+        default:
+          displayTallyState(BLACK,WHITE,80,90,"?");
+      }
+      Serial.println("Tally Mode process done");
     }
+    Serial.println("Drawing sprite");
+    // ACTS mode...
     sprite->setTextSize(2);
+    Serial.println("Set TextSize done");
     sprite->setCursor(0, 0);
+    Serial.println("Set Cursor done");
     sprite->printf("TARGET: %d\n", tally_target);
+    Serial.println("Print Target done");
     sprite->printf("ACTIVE: %d\n", current_input);
-    sprite->printf("MODE: %s\n", mode == Mode::TALLY ? "TALLY" : "ACTS");
+    Serial.println("Print Active done");
+    Serial.println("Draw sprite done. Drawing Buttons...");
     printBtnA("TALLY");
     printBtnB("SET");
     printBtnC("WIFI");
+    Serial.println("Draw sprite done. Pushing!");
     sprite->pushSprite(0, 0);
   }
 
@@ -229,6 +230,7 @@ class Engine : public Task::Base {
     sprite->setTextColor(WHITE, BLACK);
     sprite->setCursor(20,20);
     sprite->printf("Current Target: %d\n", tally_target);
+    sprite->printf("Mode: %s\n", mode);
     sprite->setCursor(20,60);
 
     printBtnA("OK");
@@ -236,9 +238,23 @@ class Engine : public Task::Base {
     printBtnC("+");
   }
 
+boolean connectToWifi() {
+  int count = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    if (count > 9) {
+      return false;
+    }
+    Serial.println("Awaiting WiFi connection...");
+    count++;
+    sprite->printf("WiFi failed(%d) retry...\n", count);
+    sprite->pushSprite(0, 0);
+    delay(5000);
+  }
+  Serial.println("Connected to WiFi!");
+  count = 0;
+  return true;
+}
 
-// Connect to vMix instance. return true and show Tally screen if success.
-// return false if failed to connect. screen will not change.
 boolean connectTovMix() {
   if (vmix_connecting) {
     return false;
@@ -253,23 +269,9 @@ boolean connectTovMix() {
 
   preferences.begin("vMixTally", true);
   
-  int count = 0;
-  while (WiFi.status() != WL_CONNECTED) {
-    if (count > 10) {
-      vmix_connecting = false;
-      return false;
-    }
-    Serial.println("Awaiting WiFi connection...");
-    count++;
-    sprite->printf("WiFi failed(%d) retry...\n", count);
-    sprite->pushSprite(0, 0);
-    delay(5000);
-  }
-  Serial.println("Connected to WiFi!");
-  count = 0;
-
   auto VMIX_IP = preferences.getString("vmix_ip"); 
   preferences.end();
+  int count = 0;
   while (0 == client.connect(VMIX_IP.c_str(),VMIX_PORT)) {
     Serial.printf("failed to connect vMix. at %s. Retrying...\n", VMIX_IP);
     count++;
@@ -289,7 +291,6 @@ boolean connectTovMix() {
   client.println("SUBSCRIBE TALLY");
   client.println("SUBSCRIBE ACTS");
   vmix_connecting = false;
-  showTallyScreen();
   return true;
 }
 
@@ -311,6 +312,7 @@ void handleData(String data) {
     
     if (currentState == Screen::TALLY) {
       showTallyScreen();
+      return;
     }
   }
 
@@ -406,6 +408,13 @@ void updateTallyNR(int tally){
     preferences.putUInt("tally", tally_target);
   }
   preferences.end();
+}
+
+void checkWiFiConnection() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected. Reconnecting...");
+    WiFi.reconnect();
+  }
 }
 
 public:
@@ -568,7 +577,7 @@ public:
           return;
         }
         Serial.printf("Starting WiFi connection. SSID:%s PW:%s", WIFI_SSID, WIFI_PASS);
-        WiFi.begin(WIFI_SSID.c_str(), WIFI_PASS.c_str());
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
         Serial.printf("Starting WiFi. SSID:%s, Password:%s\n", ssid, password);
         if (!WiFi.softAP(ssid, password)) {
           sprite->println("failed to start WiFi AP");
@@ -604,6 +613,24 @@ public:
         server.on("/portal", [&]() {
           handleCaptivePortal();
         });
+        server.on("/connecttest.txt", [&]() {
+          handleCaptivePortal(); 
+        });
+        server.on("/redirect", [&]() {
+          handleCaptivePortal();
+        });
+        server.on("/success.txt", [&]() {
+          handleCaptivePortal();
+        });
+        server.on("/wpad.dat", [&]() {
+          handleCaptivePortal();
+        });
+        server.on("/ncsi.txt", [&]() {
+          handleCaptivePortal();
+        });
+        server.on("/fwlink", [&]() {
+          handleCaptivePortal();
+        });
         server.onNotFound([&]() {
           server.sendHeader("Location", "/portal");
           server.send(302, "text/plain", "redirect to captive portal");
@@ -629,11 +656,16 @@ public:
         delay(1000);
 
         Serial.println("STARTING...");
-        if (!connectTovMix()) {
+        while (!connectToWifi()) {
           showSettingsQRCode();
-        }else {
-          showTallyScreen();
         }
+        if (!connectTovMix()) {
+          sprite->println("Fail(vMix TCP API timed out). Retrying...");
+          sprite->pushSprite(0, 0);
+          delay(5000);
+        }
+        Serial.println("Initialization complete. Showing TALLY screen");
+        showTallyScreen();
     }
 
     virtual void update() override {
@@ -730,13 +762,6 @@ public:
       if(shouldPushSprite) {
         sprite->pushSprite(0, 0);
       }
-
-      if (!vmix_connected && !vmix_connecting) {
-        Serial.println("vMix not connected on update frame. Connecting...");
-        if (!connectTovMix()) {
-          showSettingsQRCode();
-        }
-      }
       
       if(shouldPushSprite) {
         sprite->pushSprite(0, 0);
@@ -755,13 +780,6 @@ void setup() {
   PinButton btnA(39);
   PinButton btnB(38);
   PinButton btnC(37);
-
-/*
-  Tasks.add<BatteryManager>("Battery")->
-    Sprite(&canvas)->
-    startFps(1);
-*/
-
 
   auto display = std::make_shared<M5Canvas>(&M5.Lcd);
   Tasks.add<Engine>("Engine")->
