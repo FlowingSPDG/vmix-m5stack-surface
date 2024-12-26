@@ -230,7 +230,6 @@ class Engine : public Task::Base {
     sprite->setTextColor(WHITE, BLACK);
     sprite->setCursor(20,20);
     sprite->printf("Current Target: %d\n", tally_target);
-    sprite->printf("Mode: %s\n", mode);
     sprite->setCursor(20,60);
 
     printBtnA("OK");
