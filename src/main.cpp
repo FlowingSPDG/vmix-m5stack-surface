@@ -55,21 +55,122 @@ Screen currentScreen = Screen::TALLY;
 
 // Task
 
+static void TaskVMixReceiveClient(void *pvParameters) {
+  auto xLastWakeTime = xTaskGetTickCount();
+  while (1) {
+    // take semaphore
+    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
+    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+
+    if(!client.available()) {
+      xSemaphoreGive(clientSemaphore);
+      xSemaphoreGive(serialSemaphore);
+      delay(1);
+      continue;
+    }
+    auto data = client.readStringUntil('\r\n');
+    Serial.printf("Received data from vMix: %s\n", data.c_str());
+
+    // データ受信・パース処理
+    // 受け取ったデータをパースし、tally/activators専用のqueueに送信する
+    // vMixにデータを送るのは別タスクで行う
+
+    // release semaphore
+    xSemaphoreGive(clientSemaphore);
+    xSemaphoreGive(serialSemaphore);
+
+    delay(1);
+  }
+}
+
+
+static void TaskConnectVMix(void *pvParameters) {
+  auto xLastWakeTime = xTaskGetTickCount();
+  int8_t ReceivedValue = 0;
+
+  // take semaphore
+  xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
+  xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+
+  preferences.begin("vMixTally", true);
+  auto VMIX_IP = preferences.getString("vmix_ip"); 
+  preferences.end();
+
+  Serial.printf("VMIX_IP:%s\n", VMIX_IP.c_str());
+
+  // release semaphore
+  xSemaphoreGive(preferencesSemaphore);
+  xSemaphoreGive(serialSemaphore);
+
+  while(1){
+    if (xQueueReceive(xQueueConnectVMix, &ReceivedValue, portMAX_DELAY) != pdPASS){
+      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+      Serial.println("Failed to receive queue");
+      xSemaphoreGive(serialSemaphore);
+      delay(1);
+      continue;
+    }
+
+    // take semaphore
+    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
+    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
+    
+    Serial.println("Connecting to vMix...");
+    
+    if (client.connected()) {
+      Serial.println("Already connected to vMix");
+      // release semaphore
+      xSemaphoreGive(serialSemaphore);
+      xSemaphoreGive(clientSemaphore);
+      xSemaphoreGive(spriteSemaphore);
+      delay(1);
+      continue;
+    }
+    while (!client.connect(VMIX_IP.c_str(), 8099)){
+      // TODO: 一定回数リトライしても失敗した場合、待機モードへ移行する
+      Serial.println("Failed to connect to vMix");
+      sprite.println("Failed to connect to vMix");
+      sprite.pushSprite(0, 0);
+      delay(1);
+    }
+    Serial.println("Connected to vMix!");
+    Serial.println("------------");
+
+    // Subscribe to the tally events
+    client.println("SUBSCRIBE TALLY");
+    client.println("SUBSCRIBE ACTS");
+
+    // release semaphore
+    xSemaphoreGive(serialSemaphore);
+    xSemaphoreGive(clientSemaphore);
+    xSemaphoreGive(spriteSemaphore);
+
+    xTaskCreatePinnedToCore(TaskVMixReceiveClient, "VMixReceiveClient", 4096, NULL, 1,NULL, 1);
+    delay(1);
+  }
+}
+
+
 static void TaskConnectToWiFi(void *pvParameters) {
   auto xLastWakeTime = xTaskGetTickCount();
 
+  // take semaphore
+  xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+  xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
+
   // WiFiへ接続し、完了したら自身を削除する
   // 失敗した場合、設定用QRコード表示タスクへ切り替える
-  xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
   preferences.begin("vMixTally", false);
   auto WIFI_SSID = preferences.getString("wifi_ssid");
   auto WIFI_PASS = preferences.getString("wifi_pass");
   preferences.end();
-  xSemaphoreGive(preferencesSemaphore);
-
-  xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+  
   Serial.printf("WIFI_SSID:%s\n", WIFI_SSID.c_str());
   Serial.printf("WIFI_PASS:%s\n", WIFI_PASS.c_str());
+
+  // release semaphore
+  xSemaphoreGive(preferencesSemaphore);
   xSemaphoreGive(serialSemaphore);
 
   int retry = 0;
@@ -86,141 +187,71 @@ static void TaskConnectToWiFi(void *pvParameters) {
       continue;
     }
 
+    // take semaphore
     xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    Serial.println("Connecting to WiFi...");
-    xSemaphoreGive(serialSemaphore);
-
     xSemaphoreTake(xSemaphoreWiFi, portMAX_DELAY);
+    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
+
+    Serial.println("Connecting to WiFi...");
+
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     while (shouldRetry && !isWiFiConnected){
       if (WiFi.status() == WL_CONNECTED){
-        xSemaphoreGive(xSemaphoreWiFi);
         shouldRetry = false;
         isWiFiConnected = true;
         delay(1);
         break;
       }
-      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
       Serial.println("WiFi Retrying...");
-      xSemaphoreGive(serialSemaphore);
 
-      xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
       sprite.print('.');
       sprite.pushSprite(0, 0);
-      xSemaphoreGive(spriteSemaphore);
       if(++retry > 20){
-        xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
         sprite.println("Failed to connect to WiFi");
         sprite.pushSprite(0, 0);
-        xSemaphoreGive(spriteSemaphore);
 
         // QRコード表示タスクへ切り替える
         int8_t SendValue = 0;
         xQueueSend(xQueueShowSettingsQRCode, &SendValue, portMAX_DELAY);
         shouldRetry = false;
         isWiFiConnected = false;
+        xSemaphoreGive(spriteSemaphore);
+        xSemaphoreGive(xSemaphoreWiFi);
+        xSemaphoreGive(serialSemaphore);
+        delay(1);
+        break;
       }
-     delay(1000);
+     delay(3000);
     }
 
-    xSemaphoreGive(xSemaphoreWiFi);
     if (!isWiFiConnected && !shouldRetry){
+      xSemaphoreGive(spriteSemaphore);
+      xSemaphoreGive(xSemaphoreWiFi);
+      xSemaphoreGive(serialSemaphore);
       delay(1);
       continue;
     };
 
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
     sprite.println("Connected to WiFi");
     sprite.pushSprite(0, 0);
-    xSemaphoreGive(spriteSemaphore);
 
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
     Serial.println("Connected to WiFi");
-    xSemaphoreGive(serialSemaphore);
 
     int8_t SendValue = 0;
     xQueueSend(xQueueConnectVMix, &SendValue, portMAX_DELAY);
+
+    // release semaphore
+    xSemaphoreGive(spriteSemaphore);
+    xSemaphoreGive(xSemaphoreWiFi);
+    xSemaphoreGive(serialSemaphore);
+
+    // Start vMix task
+    xTaskCreatePinnedToCore(TaskConnectVMix, "ConnectVMix", 4096, NULL, 1,NULL, 1);
+
+    delay(1);
   };
 }
 
-static void TaskConnectVMix(void *pvParameters) {
-  auto xLastWakeTime = xTaskGetTickCount();
-  int8_t ReceivedValue = 0;
-
-  xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
-  preferences.begin("vMixTally", true);
-  auto VMIX_IP = preferences.getString("vmix_ip"); 
-  preferences.end();
-  xSemaphoreGive(preferencesSemaphore);
-
-  xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-  Serial.printf("VMIX_IP:%s\n", VMIX_IP.c_str());
-  xSemaphoreGive(serialSemaphore);
-
-  while(1){
-    if (xQueueReceive(xQueueConnectVMix, &ReceivedValue, portMAX_DELAY) != pdPASS){
-      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-      Serial.println("Failed to receive queue");
-      xSemaphoreGive(serialSemaphore);
-      continue;
-    }
-
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    Serial.println("Connecting to vMix...");
-    xSemaphoreGive(serialSemaphore);
-    
-    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
-    if (client.connected()) {
-      xSemaphoreGive(clientSemaphore);
-
-      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-      Serial.println("Already connected to vMix");
-      xSemaphoreGive(serialSemaphore);
-      continue;
-    }
-    while (!client.connect(VMIX_IP.c_str(), 8099)){
-      // TODO: 一定回数リトライしても失敗した場合、待機モードへ移行する
-      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-      Serial.println("Failed to connect to vMix");
-      xSemaphoreGive(serialSemaphore);
-      xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
-      sprite.println("Failed to connect to vMix");
-      sprite.pushSprite(0, 0);
-      xSemaphoreGive(spriteSemaphore);
-      vTaskDelayUntil(&xLastWakeTime, 1000 / portTICK_PERIOD_MS);
-    }
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    Serial.println("Connected to vMix!");
-    Serial.println("------------");
-    xSemaphoreGive(serialSemaphore);
-
-    // Subscribe to the tally events
-    client.println("SUBSCRIBE TALLY");
-    client.println("SUBSCRIBE ACTS");
-    xSemaphoreGive(clientSemaphore);
-  }
-}
-
-static void TaskVMixReceiveClient(void *pvParameters) {
-  auto xLastWakeTime = xTaskGetTickCount();
-  while (1) {
-    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
-    if(!client.available()) {
-      xSemaphoreGive(clientSemaphore);
-      continue;
-    }
-    auto data = client.readStringUntil('\r\n');
-    xSemaphoreGive(clientSemaphore);
-
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    Serial.printf("Received data from vMix: %s\n", data.c_str());
-    xSemaphoreGive(serialSemaphore);
-
-    // データ受信・パース処理
-    // 受け取ったデータをパースし、tally/activators専用のqueueに送信する
-    // vMixにデータを送るのは別タスクで行う
-  }
-}
 
 static void TaskVMixSendClient(void *pvParameters) {
   auto xLastWakeTime = xTaskGetTickCount();
@@ -230,16 +261,24 @@ static void TaskVMixSendClient(void *pvParameters) {
       xSemaphoreTake(serialSemaphore, portMAX_DELAY);
       Serial.println("Failed to receive queue");
       xSemaphoreGive(serialSemaphore);
+      delay(1);
       continue;
     }
-    // これはTCP APIに接続されてるかどうかの確認であっているのか？
+
+    // take semaphore
     xSemaphoreTake(clientSemaphore, portMAX_DELAY);
+
+    // これはTCP APIに接続されてるかどうかの確認であっているのか？
     if (client.connected()) {
       // データ送信処理
       // tally/activators専用のqueueからデータを受け取り、vMixに送信する
       client.printf("%s %s\r\n", ReceivedValue.Function.c_str(), ReceivedValue.Query.c_str());
     }
+
+    // release semaphore
     xSemaphoreGive(clientSemaphore);
+
+    delay(1);
   }
 }
 
@@ -251,7 +290,7 @@ static void TaskDNSServer(void *pvParameters) {
     xSemaphoreTake(serialSemaphore, portMAX_DELAY);
     Serial.println("Failed to start DNS server!");
     xSemaphoreGive(serialSemaphore);
-    delay(1000);
+    delay(1);
     continue;
   }
 
@@ -261,6 +300,7 @@ static void TaskDNSServer(void *pvParameters) {
 
   while(true){
     dnsServer.processNextRequest();
+    delay(1);
   }
 }
 
@@ -416,6 +456,7 @@ static void TaskHTTPServer(void *pvParameters) {
 
   while (true) {
     server.handleClient();
+    delay(1);
   }
 }
 
@@ -431,24 +472,26 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
       xSemaphoreTake(serialSemaphore, portMAX_DELAY);
       Serial.println("Failed to receive queue");
       xSemaphoreGive(serialSemaphore);
+      delay(1);
       continue;
     }
 
+    // take semaphore
     xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    Serial.println("Starting WiFi AP...");
-    xSemaphoreGive(serialSemaphore);
-
+    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
     xSemaphoreTake(xSemaphoreWiFi, portMAX_DELAY);
 
+    Serial.println("Starting WiFi AP...");
     WiFi.mode(WIFI_MODE_APSTA);
     const char *ssid = "vMixTally";
     const char *password = "vMixTally";
     // use generated ssid and password instead
     if (!WiFi.softAP(ssid, password)) {
-      xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
       sprite.println("failed to start WiFi AP");
       sprite.pushSprite(0, 0);
+      xSemaphoreGive(serialSemaphore);
       xSemaphoreGive(spriteSemaphore);
+      xSemaphoreGive(xSemaphoreWiFi);
       continue;
     }
     delay(300);
@@ -457,17 +500,17 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     IPAddress gateway(192, 168, 4,9);  
     IPAddress subnet(255, 255, 255,0); 
     if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
-      xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
       sprite.println("WiFi AP configuration failed");
       sprite.pushSprite(0, 0);
+      xSemaphoreGive(serialSemaphore);
       xSemaphoreGive(spriteSemaphore);
+      xSemaphoreGive(xSemaphoreWiFi);
       continue;
     };
 
     // 画面表示
     Serial.println("Showing Settings QR Code");
     currentScreen = Screen::SETTINGS_QR;
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
     sprite.fillScreen(TFT_BLACK);
     sprite.setTextColor(WHITE, BLACK);
     sprite.setCursor(0, 0);
@@ -475,7 +518,6 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     sprite.println("Scan QR Code to configure");
     sprite.printf("  SSID:%s\n PW:%s\n", ssid, password);
     sprite.pushSprite(0, 0);
-    xSemaphoreGive(spriteSemaphore);
 
     // TODO: Split method / destructor
 
@@ -486,10 +528,13 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     sprite.println();
     // 表示位置: 中央=(画面横幅/2)-(QRコードの幅/2)
     auto width = sprite.width()/3;
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
     sprite.qrcode(buf, 0, (sprite.width()/2)-(width/2), width, 3);
     sprite.pushSprite(0, 0);
+
+    // release semaphore
+    xSemaphoreGive(serialSemaphore);
     xSemaphoreGive(spriteSemaphore);
+    xSemaphoreGive(xSemaphoreWiFi);
 
     // HTTP/DNSサーバーを起動
     xTaskCreatePinnedToCore(TaskDNSServer, "DNSServer", 4096, NULL, 1,NULL, 1);
@@ -526,8 +571,6 @@ void setup() {
   }
 
   xTaskCreatePinnedToCore(TaskConnectToWiFi, "ConnectToWiFi", 4096, NULL, 1,NULL, 1);
-  xTaskCreatePinnedToCore(TaskConnectVMix, "ConnectVMix", 4096, NULL, 1,NULL, 1);
-  xTaskCreatePinnedToCore(TaskVMixReceiveClient, "VMixReceiveClient", 4096, NULL, 1,NULL, 1);
   // xTaskCreatePinnedToCore(TaskVMixSendClient, "VMixSendClient", 4096, NULL, 1,NULL, 1);
   xTaskCreatePinnedToCore(TaskShowSetingsQRCode, "ShowSettingsQRCode", 4096, NULL, 1,NULL, 1);
   
