@@ -49,6 +49,7 @@ SemaphoreHandle_t clientSemaphore = xSemaphoreCreateMutex();
 SemaphoreHandle_t xSemaphoreWiFi = xSemaphoreCreateMutex();
 TaskHandle_t xTaskShowTallyHandle;
 TaskHandle_t xTaskRetryVmixHandle;
+TaskHandle_t xTaskConnectVMixHandle;
 
 // instance
 WiFiClient client;
@@ -317,8 +318,22 @@ static void TaskVMixSendClient(void *pvParameters) {
   }
 }
 
+static void printBtnA(String s){
+  sprite.setCursor(40, 220);
+  sprite.print(s);
+}
+
+static void printBtnB(String s){
+  sprite.setCursor(145, 220);
+  sprite.print(s);
+}
+
+static void printBtnC(String s){
+  sprite.setCursor(240, 220);
+  sprite.print(s);
+}
+
 static void TaskConnectVMix(void *pvParameters) {
-  auto xLastWakeTime = xTaskGetTickCount();
   int8_t ReceivedValue = 0;
   const Tally tally = Tally::DISCONNECTED;
 
@@ -393,8 +408,6 @@ static void TaskConnectVMix(void *pvParameters) {
 
 
 static void TaskConnectToWiFi(void *pvParameters) {
-  auto xLastWakeTime = xTaskGetTickCount();
-
   // take semaphore
   xSemaphoreTake(serialSemaphore, portMAX_DELAY);
   xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
@@ -482,7 +495,7 @@ static void TaskConnectToWiFi(void *pvParameters) {
     xSemaphoreGive(serialSemaphore);
 
     // Start vMix task
-    xTaskCreatePinnedToCore(TaskConnectVMix, "ConnectVMix", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(TaskConnectVMix, "ConnectVMix", 4096, NULL, 1, &xTaskConnectVMixHandle, 1);
     xTaskCreatePinnedToCore(TaskRetryVmix, "RetryVMix", 4096, NULL, 1, &xTaskRetryVmixHandle, 1);
 
     delay(5000);
@@ -781,7 +794,6 @@ static void TaskShowSettings(void *pvParameters) {
 static void TaskShowSetingsQRCode(void *pvParameters) {
   // QRコード表示タスク
   // WiFiをAPとしてスタートし、接続用QRコードを表示する
-  auto xLastWakeTime = xTaskGetTickCount();
   int8_t ReceivedValue = 0;
   while (1) {
     if (xQueueReceive(xQueueShowSettingsQRCode, &ReceivedValue, portMAX_DELAY) != pdPASS){
@@ -853,6 +865,7 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     xSemaphoreGive(xSemaphoreWiFi);
 
     // HTTP/DNSサーバーを起動
+    vTaskDelete(xTaskConnectVMixHandle);
     xTaskCreatePinnedToCore(TaskDNSServer, "DNSServer", 4096, NULL, 1,NULL, 1);
     xTaskCreatePinnedToCore(TaskHTTPServer, "HTTPServer", 4096, NULL, 1,NULL, 1);
 
