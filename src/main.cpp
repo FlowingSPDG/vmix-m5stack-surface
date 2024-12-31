@@ -31,6 +31,7 @@ enum Tally {
   PGM,
   PRV,
   UNKNOWN,
+  DISCONNECTED,
 };
 
 // queue related
@@ -39,11 +40,14 @@ QueueHandle_t xQueueConnectVMix = xQueueCreate( 1, sizeof( int8_t ) );
 QueueHandle_t xQueueVMixSendFunction = xQueueCreate( 1, sizeof( VMixCommandFunction ) );
 QueueHandle_t xQueueShowSettingsQRCode = xQueueCreate( 1, sizeof( int8_t ) );
 QueueHandle_t xQueueShowTally = xQueueCreate( 1, sizeof( Tally ) );
+QueueHandle_t xQueueShowSettings = xQueueCreate( 1, sizeof( int8_t ) );
 SemaphoreHandle_t preferencesSemaphore = xSemaphoreCreateMutex();
 SemaphoreHandle_t serialSemaphore = xSemaphoreCreateMutex();
 SemaphoreHandle_t spriteSemaphore = xSemaphoreCreateMutex();
 SemaphoreHandle_t clientSemaphore = xSemaphoreCreateMutex();
 SemaphoreHandle_t xSemaphoreWiFi = xSemaphoreCreateMutex();
+TaskHandle_t xTaskShowTallyHandle;
+TaskHandle_t xTaskRetryVmixHandle;
 
 // instance
 WiFiClient client;
@@ -53,6 +57,7 @@ M5Canvas sprite(&M5.Lcd);
 
 // state
 Screen currentScreen = Screen::TALLY;
+bool vMixConnected = false;
 
 // utility functions
 Tally parseTallyInt(char c) {
@@ -72,11 +77,11 @@ Tally parseTallyInt(char c) {
 
 static void TaskShowTally(void *pvParameters) {
   // Tally表示タスク
-  auto xLastWakeTime = xTaskGetTickCount();
-  auto current = Tally::UNKNOWN;
-  Tally ReceivedValue;
+  Tally current = Tally::UNKNOWN;
+  Tally ReceivedValue = Tally::UNKNOWN;
+  int8_t SendValue = 0;
+
   while (1) {
-    // TODO: Canvas/Sprite?
     if (xQueueReceive(xQueueShowTally, &ReceivedValue, portMAX_DELAY) != pdPASS){
       xSemaphoreTake(serialSemaphore, portMAX_DELAY);
       Serial.println("Failed to receive queue");
@@ -84,76 +89,125 @@ static void TaskShowTally(void *pvParameters) {
       delay(1);
       continue;
     }
-
-    if (current == ReceivedValue){
-      delay(1);
-      continue;
-    }
+    
+    // TODO: 二重描画対策...
 
     // take semaphore
     xSemaphoreTake(serialSemaphore, portMAX_DELAY);
     xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
 
+    sprite.setTextSize(5);
     switch (ReceivedValue){
       case Tally::SAFE:
-        sprite.fillScreen(TFT_BLACK);
+        sprite.fillSprite(TFT_BLACK);
         sprite.setTextColor(TFT_WHITE);
-        sprite.drawCentreString("SAFE", sprite.width()/2, sprite.height()/2, 4);
+        sprite.drawCentreString("SAFE", sprite.width()/2, sprite.height()/2, 5);
         Serial.println("SAFE");
         break;
       case Tally::PGM:
-        sprite.fillScreen(TFT_RED);
+        sprite.fillSprite(TFT_RED);
         sprite.setTextColor(TFT_WHITE);
-        sprite.drawCentreString("PGM", sprite.width()/2, sprite.height()/2, 4);
+        sprite.drawCentreString("PGM", sprite.width()/2, sprite.height()/2, 5);
         Serial.println("PGM");
         break;
       case Tally::PRV:
-        sprite.fillScreen(TFT_GREEN);
+        sprite.fillSprite(TFT_GREEN);
         sprite.setTextColor(TFT_BLACK);
-        sprite.drawCentreString("PRV", sprite.width()/2, sprite.height()/2, 4);
+        sprite.drawCentreString("PRV", sprite.width()/2, sprite.height()/2, 5);
         Serial.println("PRV");
         break;
       case Tally::UNKNOWN:
-        sprite.fillScreen(TFT_WHITE);
+        sprite.fillSprite(TFT_WHITE);
         sprite.setTextColor(TFT_BLACK);
-        sprite.drawCentreString("UNKNOWN", sprite.width()/2, sprite.height()/2, 4);
+        sprite.drawCentreString("UNKNOWN", sprite.width()/2, sprite.height()/2, 5);
         Serial.println("UNKNOWN");
         break;
+      case Tally::DISCONNECTED:
+        sprite.fillSprite(TFT_DARKGRAY);
+        sprite.setTextColor(TFT_WHITE);
+        sprite.drawCentreString("DC", sprite.width()/2, sprite.height()/2, 5);
+        Serial.println("DISCONNECTED...");
+        break;
     }
+
     sprite.pushSprite(0, 0);
 
-    current = ReceivedValue;
-    
     // release semaphore
     xSemaphoreGive(serialSemaphore);
     xSemaphoreGive(spriteSemaphore);
+
+    current = ReceivedValue;
+    currentScreen = Screen::TALLY;
 
     delay(1);
   }
 }
 
+static void TaskRetryVmix(void *pvParameters) {
+  int8_t SendValue = 0;
+  while(true){
+    if (client.connected()){
+      vMixConnected = true;
+    }else {
+      vMixConnected = false;
+      xQueueSend(xQueueConnectVMix, &SendValue, portMAX_DELAY);
+    }
+    
+    delay(1000);
+  }
+}
+
+static void TaskButtonController(void *pvParameters) {
+  int8_t SendValue = 0;
+  while (1) {
+    M5.update();
+    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+    switch(currentScreen){
+      case Screen::TALLY:
+        if (M5.BtnA.wasPressed()) {
+          Serial.println("Button A pressed. Changing to Settings screen...");
+          xQueueSend(xQueueShowSettings, &SendValue, portMAX_DELAY);
+        }
+        break;
+      case Screen::SETTINGS:
+        if (M5.BtnA.wasPressed()) {
+          Serial.println("Button A pressed. Changing to Tally screen...");
+          // TODO: タリーの保存・復元処理
+          Tally SendValue = Tally::UNKNOWN;
+          xQueueSend(xQueueShowTally, &SendValue, portMAX_DELAY);
+        }else if (M5.BtnC.wasPressed()) {
+          Serial.println("Button C pressed. Changing to Settings QR Code screen...");
+          xQueueSend(xQueueShowSettingsQRCode, &SendValue, portMAX_DELAY);
+        }
+        break;
+    }
+    xSemaphoreGive(serialSemaphore);
+
+    delay(1);
+  }
+}
 
 static void TaskVMixReceiveClient(void *pvParameters) {
-  auto xLastWakeTime = xTaskGetTickCount();
   int tally_target = 1;
   String data;
   Tally current;
 
-  xTaskCreatePinnedToCore(TaskShowTally, "ShowTally", 4096, NULL, 1,NULL, 1);
+  xTaskCreatePinnedToCore(TaskShowTally, "ShowTally", 4096, NULL, 1, &xTaskShowTallyHandle, 1);
 
   while (1) {
+    if(!vMixConnected) {
+      delay(1);
+      continue;
+    }
+
+    if (!client.available()) {
+      delay(1);
+      continue;
+    }
     // take semaphore
     xSemaphoreTake(clientSemaphore, portMAX_DELAY);
     xSemaphoreTake(serialSemaphore, portMAX_DELAY);
     xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
-
-    if(!client.available()) {
-      xSemaphoreGive(clientSemaphore);
-      xSemaphoreGive(serialSemaphore);
-      xSemaphoreGive(preferencesSemaphore);
-      delay(1);
-      continue;
-    }
     data = client.readStringUntil('\r\n');
     Serial.printf("Received data from vMix: %s\n", data.c_str());
 
@@ -171,8 +225,10 @@ static void TaskVMixReceiveClient(void *pvParameters) {
 
       data = data.substring(sizeof("TALLY OK"));
       current = parseTallyInt(data.charAt(tally_target -1));
-      // apply
-      xQueueSend(xQueueShowTally, &current, portMAX_DELAY);
+      // 別の画面にいた場合ignoreする
+      if (currentScreen == Screen::TALLY) {
+        xQueueSend(xQueueShowTally, &current, portMAX_DELAY);
+      }
     }
 
     // ACTS
@@ -193,6 +249,7 @@ static void TaskVMixReceiveClient(void *pvParameters) {
 static void TaskConnectVMix(void *pvParameters) {
   auto xLastWakeTime = xTaskGetTickCount();
   int8_t ReceivedValue = 0;
+  const Tally tally = Tally::DISCONNECTED;
 
   // take semaphore
   xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
@@ -220,37 +277,41 @@ static void TaskConnectVMix(void *pvParameters) {
     // take semaphore
     xSemaphoreTake(serialSemaphore, portMAX_DELAY);
     xSemaphoreTake(clientSemaphore, portMAX_DELAY);
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
     
     Serial.println("Connecting to vMix...");
     
-    if (client.connected()) {
+    if (vMixConnected) {
       Serial.println("Already connected to vMix");
       // release semaphore
       xSemaphoreGive(serialSemaphore);
       xSemaphoreGive(clientSemaphore);
-      xSemaphoreGive(spriteSemaphore);
       delay(1);
       continue;
     }
-    while (!client.connect(VMIX_IP.c_str(), 8099)){
-      // TODO: 一定回数リトライしても失敗した場合、待機モードへ移行する
+    if (!client.connect(VMIX_IP.c_str(), 8099, 50)){
       Serial.println("Failed to connect to vMix");
-      sprite.println("Failed to connect to vMix");
-      sprite.pushSprite(0, 0);
+
+      // release semaphore
+      xSemaphoreGive(serialSemaphore);
+      xSemaphoreGive(clientSemaphore);
+      vMixConnected = false;
       delay(1);
+      continue;
     }
+
+    vMixConnected = client.connected();
     Serial.println("Connected to vMix!");
     Serial.println("------------");
+    delay(1);
 
     // Subscribe to the tally events
     client.println("SUBSCRIBE TALLY");
     client.println("SUBSCRIBE ACTS");
+    delay(1);
 
     // release semaphore
     xSemaphoreGive(serialSemaphore);
     xSemaphoreGive(clientSemaphore);
-    xSemaphoreGive(spriteSemaphore);
 
     xTaskCreatePinnedToCore(TaskVMixReceiveClient, "VMixReceiveClient", 4096, NULL, 1,NULL, 1);
     delay(1);
@@ -280,8 +341,10 @@ static void TaskConnectToWiFi(void *pvParameters) {
   xSemaphoreGive(serialSemaphore);
 
   int retry = 0;
+  int vMixRetry = 5;
   
   int8_t ReceivedValue = 0;
+  int8_t SendValue = 0;
   bool shouldRetry = true;
   bool isWiFiConnected = false;
   while(1){
@@ -300,6 +363,7 @@ static void TaskConnectToWiFi(void *pvParameters) {
 
     Serial.println("Connecting to WiFi...");
 
+    WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     while (shouldRetry && !isWiFiConnected){
       if (WiFi.status() == WL_CONNECTED){
@@ -317,14 +381,9 @@ static void TaskConnectToWiFi(void *pvParameters) {
         sprite.pushSprite(0, 0);
 
         // QRコード表示タスクへ切り替える
-        int8_t SendValue = 0;
         xQueueSend(xQueueShowSettingsQRCode, &SendValue, portMAX_DELAY);
         shouldRetry = false;
         isWiFiConnected = false;
-        xSemaphoreGive(spriteSemaphore);
-        xSemaphoreGive(xSemaphoreWiFi);
-        xSemaphoreGive(serialSemaphore);
-        delay(1);
         break;
       }
      delay(3000);
@@ -343,16 +402,23 @@ static void TaskConnectToWiFi(void *pvParameters) {
 
     Serial.println("Connected to WiFi");
 
-    int8_t SendValue = 0;
-    xQueueSend(xQueueConnectVMix, &SendValue, portMAX_DELAY);
-
     // release semaphore
     xSemaphoreGive(spriteSemaphore);
     xSemaphoreGive(xSemaphoreWiFi);
     xSemaphoreGive(serialSemaphore);
 
     // Start vMix task
-    xTaskCreatePinnedToCore(TaskConnectVMix, "ConnectVMix", 4096, NULL, 1,NULL, 1);
+    xTaskCreatePinnedToCore(TaskConnectVMix, "ConnectVMix", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(TaskRetryVmix, "RetryVMix", 4096, NULL, 1, &xTaskRetryVmixHandle, 1);
+
+    delay(5000);
+    if(!vMixConnected){
+      if (xTaskShowTallyHandle == NULL){
+        xTaskCreatePinnedToCore(TaskShowTally, "ShowTally", 4096, NULL, 1, &xTaskShowTallyHandle, 1);
+      }
+      Tally SendValue = Tally::DISCONNECTED;
+      xQueueSend(xQueueShowTally, &SendValue, portMAX_DELAY);
+    }
 
     delay(1);
   };
@@ -568,6 +634,58 @@ static void TaskHTTPServer(void *pvParameters) {
 
 // スクリーン制御タスク...
 
+static void TaskShowSettings(void *pvParameters) {
+  // 設定画面表示タスク
+  auto xLastWakeTime = xTaskGetTickCount();
+  int8_t ReceivedValue = 0;
+  while (1) {
+    if (xQueueReceive(xQueueShowSettings, &ReceivedValue, portMAX_DELAY) != pdPASS){
+      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+      Serial.println("Failed to receive queue");
+      xSemaphoreGive(serialSemaphore);
+      delay(1);
+      continue;
+    }
+
+    // take semaphore
+    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
+    xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
+
+    Serial.println("Showing Settings");
+    preferences.begin("vMixTally", false);
+    sprite.fillScreen(TFT_BLACK);
+    sprite.setTextSize(2);
+    sprite.setTextColor(WHITE, BLACK);
+    sprite.setCursor(0, 0);
+    sprite.println("Settings");
+
+    sprite.println();
+    sprite.println();
+    sprite.println("vMix");
+    sprite.printf("  IP: %s\n", preferences.getString("vmix_ip"));
+    sprite.printf("  CAMERA: %d\n", preferences.getUInt("tally"));
+    sprite.println();
+
+    sprite.println("Network");
+    sprite.printf("  SSID: %s\n", preferences.getString("wifi_ssid")); 
+    sprite.printf("  Password: %s\n", preferences.getString("wifi_pass"));
+    sprite.println();
+    sprite.pushSprite(0, 0);
+    
+    preferences.end();
+
+    // release semaphore
+    xSemaphoreGive(serialSemaphore);
+    xSemaphoreGive(spriteSemaphore);
+    xSemaphoreGive(preferencesSemaphore);
+
+    currentScreen = Screen::SETTINGS;
+
+    delay(1);
+  }
+}
+
 static void TaskShowSetingsQRCode(void *pvParameters) {
   // QRコード表示タスク
   // WiFiをAPとしてスタートし、接続用QRコードを表示する
@@ -588,7 +706,7 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     xSemaphoreTake(xSemaphoreWiFi, portMAX_DELAY);
 
     Serial.println("Starting WiFi AP...");
-    WiFi.mode(WIFI_MODE_APSTA);
+    WiFi.mode(WIFI_AP);
     const char *ssid = "vMixTally";
     const char *password = "vMixTally";
     // use generated ssid and password instead
@@ -616,7 +734,6 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
 
     // 画面表示
     Serial.println("Showing Settings QR Code");
-    currentScreen = Screen::SETTINGS_QR;
     sprite.fillScreen(TFT_BLACK);
     sprite.setTextColor(WHITE, BLACK);
     sprite.setCursor(0, 0);
@@ -643,12 +760,14 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     xSemaphoreGive(xSemaphoreWiFi);
 
     // HTTP/DNSサーバーを起動
+    vTaskSuspend(xTaskRetryVmixHandle);
     xTaskCreatePinnedToCore(TaskDNSServer, "DNSServer", 4096, NULL, 1,NULL, 1);
     xTaskCreatePinnedToCore(TaskHTTPServer, "HTTPServer", 4096, NULL, 1,NULL, 1);
 
     // captivePortalについて
     // なぜか実際に開かれるまでかかる時間が非常に長い
     // AP_STAモードだからかもしれないので、制御出来そうなら設定時はAP、それ以外はSTAにする
+    currentScreen = Screen::SETTINGS_QR;
     delay(1);
   }
 }
@@ -669,6 +788,8 @@ void setup() {
 
   xTaskCreatePinnedToCore(TaskConnectToWiFi, "ConnectToWiFi", 4096, NULL, 1,NULL, 1);
   xTaskCreatePinnedToCore(TaskShowSetingsQRCode, "ShowSettingsQRCode", 4096, NULL, 1,NULL, 1);
+  xTaskCreatePinnedToCore(TaskShowSettings, "ShowSettings", 4096, NULL, 1,NULL, 1);
+  xTaskCreatePinnedToCore(TaskButtonController, "ButtonController", 4096, NULL, 1,NULL, 1);
   
   // xQueueConnectWiFiに値を送信することでTaskConnectToWiFiを開始する
   int8_t SendValue = 0;
