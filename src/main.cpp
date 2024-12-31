@@ -41,6 +41,7 @@ QueueHandle_t xQueueVMixSendFunction = xQueueCreate( 1, sizeof( VMixCommandFunct
 QueueHandle_t xQueueShowSettingsQRCode = xQueueCreate( 1, sizeof( int8_t ) );
 QueueHandle_t xQueueShowTally = xQueueCreate( 1, sizeof( Tally ) );
 QueueHandle_t xQueueShowSettings = xQueueCreate( 1, sizeof( int8_t ) );
+QueueHandle_t xQueueChangeSettings = xQueueCreate( 1, sizeof( uint32_t ) );
 SemaphoreHandle_t preferencesSemaphore = xSemaphoreCreateMutex();
 SemaphoreHandle_t serialSemaphore = xSemaphoreCreateMutex();
 SemaphoreHandle_t spriteSemaphore = xSemaphoreCreateMutex();
@@ -57,6 +58,7 @@ M5Canvas sprite(&M5.Lcd);
 
 // state
 Screen currentScreen = Screen::TALLY;
+uint32_t tallyTarget = 1;
 bool vMixConnected = false;
 
 // utility functions
@@ -175,9 +177,30 @@ static void TaskButtonController(void *pvParameters) {
           // TODO: タリーの保存・復元処理
           Tally SendValue = Tally::UNKNOWN;
           xQueueSend(xQueueShowTally, &SendValue, portMAX_DELAY);
-        }else if (M5.BtnC.wasPressed()) {
+        }
+        else if (M5.BtnB.wasPressed()) {
+          Serial.println("Button B pressed. Changing to Tally Set screen...");
+          xQueueSend(xQueueChangeSettings, &tallyTarget, portMAX_DELAY);
+        }
+        else if (M5.BtnC.wasPressed()) {
           Serial.println("Button C pressed. Changing to Settings QR Code screen...");
           xQueueSend(xQueueShowSettingsQRCode, &SendValue, portMAX_DELAY);
+        }
+        break;
+      case Screen::TALLY_SET:
+        if (M5.BtnA.wasPressed()) {
+          Serial.println("Button A pressed. Changing to Settings screen...");
+          xQueueSend(xQueueShowSettings, &SendValue, portMAX_DELAY);
+        }
+        else if (M5.BtnB.wasPressed()) {
+          Serial.println("Button B pressed. Changing to Tally Set screen...");
+          tallyTarget--;
+          xQueueSend(xQueueChangeSettings, &tallyTarget, portMAX_DELAY);
+        }
+        else if (M5.BtnC.wasPressed()) {
+          Serial.println("Button C pressed. Changing to Tally Set screen...");
+          tallyTarget++;
+          xQueueSend(xQueueChangeSettings, &tallyTarget, portMAX_DELAY);
         }
         break;
     }
@@ -188,7 +211,6 @@ static void TaskButtonController(void *pvParameters) {
 }
 
 static void TaskVMixReceiveClient(void *pvParameters) {
-  int tally_target = 1;
   String data;
   Tally current;
 
@@ -220,11 +242,11 @@ static void TaskVMixReceiveClient(void *pvParameters) {
     if (data.startsWith("TALLY OK")) {
       // fetch preference
       preferences.begin("vMixTally", true);
-      tally_target = preferences.getUInt("tally");
+      tallyTarget = preferences.getUInt("tally");
       preferences.end();
 
       data = data.substring(sizeof("TALLY OK"));
-      current = parseTallyInt(data.charAt(tally_target -1));
+      current = parseTallyInt(data.charAt(tallyTarget -1));
       // 別の画面にいた場合ignoreする
       if (currentScreen == Screen::TALLY) {
         xQueueSend(xQueueShowTally, &current, portMAX_DELAY);
@@ -374,6 +396,7 @@ static void TaskConnectToWiFi(void *pvParameters) {
       }
       Serial.println("WiFi Retrying...");
 
+      // TODO: Loading screen
       sprite.print('.');
       sprite.pushSprite(0, 0);
       if(++retry > 20){
@@ -632,11 +655,58 @@ static void TaskHTTPServer(void *pvParameters) {
   }
 }
 
-// スクリーン制御タスク...
+static void TaskShowTallySet(void *pvParameters) {
+  // キューを受信
+  // 設定を変更(Target inputの変更, etc)
+  // 画面を更新(入力はButtonControllerで行う)
+  uint32_t ReceivedValue = 0;
+  while (1) {
+    if (xQueueReceive(xQueueChangeSettings, &ReceivedValue, portMAX_DELAY) != pdPASS){
+      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+      Serial.println("Failed to receive queue");
+      xSemaphoreGive(serialSemaphore);
+      delay(1);
+      continue;
+    }
+
+    // take semaphore
+    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+    xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
+    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
+
+    Serial.println("Changing Settings");
+
+    preferences.begin("vMixTally", false);
+    preferences.putUInt("tally", ReceivedValue);
+    preferences.end();
+    tallyTarget = ReceivedValue;
+
+    sprite.fillScreen(TFT_BLACK);
+    sprite.setTextSize(2);
+    sprite.setTextColor(WHITE, BLACK);
+    sprite.setCursor(0, 0);
+    sprite.println("Settings(EDIT)");
+
+    sprite.println();
+    sprite.println();
+    sprite.println("vMix");
+    sprite.printf("  TALLY TARGET: %d\n", tallyTarget);
+    sprite.println();
+    sprite.pushSprite(0, 0);
+    
+    // release semaphore
+    xSemaphoreGive(serialSemaphore);
+    xSemaphoreGive(preferencesSemaphore);
+    xSemaphoreGive(spriteSemaphore);
+
+    currentScreen = Screen::TALLY_SET;
+
+    delay(1);
+  }
+}
 
 static void TaskShowSettings(void *pvParameters) {
   // 設定画面表示タスク
-  auto xLastWakeTime = xTaskGetTickCount();
   int8_t ReceivedValue = 0;
   while (1) {
     if (xQueueReceive(xQueueShowSettings, &ReceivedValue, portMAX_DELAY) != pdPASS){
@@ -664,12 +734,12 @@ static void TaskShowSettings(void *pvParameters) {
     sprite.println();
     sprite.println("vMix");
     sprite.printf("  IP: %s\n", preferences.getString("vmix_ip"));
-    sprite.printf("  CAMERA: %d\n", preferences.getUInt("tally"));
+    sprite.printf("  TALLY TARGET: %d\n", preferences.getUInt("tally"));
     sprite.println();
 
     sprite.println("Network");
-    sprite.printf("  SSID: %s\n", preferences.getString("wifi_ssid")); 
-    sprite.printf("  Password: %s\n", preferences.getString("wifi_pass"));
+    sprite.printf("  SSID: %s\n", preferences.getString("wifi_ssid").c_str()); 
+    sprite.printf("  Password: %s\n", preferences.getString("wifi_pass").c_str());
     sprite.println();
     sprite.pushSprite(0, 0);
     
@@ -705,11 +775,12 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
     xSemaphoreTake(xSemaphoreWiFi, portMAX_DELAY);
 
+    WiFi.disconnect();
     Serial.println("Starting WiFi AP...");
     WiFi.mode(WIFI_AP);
     const char *ssid = "vMixTally";
     const char *password = "vMixTally";
-    // use generated ssid and password instead
+    // TODO: use generated ssid and password instead
     if (!WiFi.softAP(ssid, password)) {
       sprite.println("failed to start WiFi AP");
       sprite.pushSprite(0, 0);
@@ -721,7 +792,7 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     delay(300);
     // Fixed IPs
     IPAddress local_IP(192, 168, 4,22);
-    IPAddress gateway(192, 168, 4,9);  
+    IPAddress gateway(192, 168, 4,9);
     IPAddress subnet(255, 255, 255,0); 
     if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
       sprite.println("WiFi AP configuration failed");
@@ -760,13 +831,11 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     xSemaphoreGive(xSemaphoreWiFi);
 
     // HTTP/DNSサーバーを起動
-    vTaskSuspend(xTaskRetryVmixHandle);
     xTaskCreatePinnedToCore(TaskDNSServer, "DNSServer", 4096, NULL, 1,NULL, 1);
     xTaskCreatePinnedToCore(TaskHTTPServer, "HTTPServer", 4096, NULL, 1,NULL, 1);
 
     // captivePortalについて
-    // なぜか実際に開かれるまでかかる時間が非常に長い
-    // AP_STAモードだからかもしれないので、制御出来そうなら設定時はAP、それ以外はSTAにする
+    // なぜか実際に開かれるまでかかる時間が非常に長い...
     currentScreen = Screen::SETTINGS_QR;
     delay(1);
   }
@@ -789,6 +858,7 @@ void setup() {
   xTaskCreatePinnedToCore(TaskConnectToWiFi, "ConnectToWiFi", 4096, NULL, 1,NULL, 1);
   xTaskCreatePinnedToCore(TaskShowSetingsQRCode, "ShowSettingsQRCode", 4096, NULL, 1,NULL, 1);
   xTaskCreatePinnedToCore(TaskShowSettings, "ShowSettings", 4096, NULL, 1,NULL, 1);
+  xTaskCreatePinnedToCore(TaskShowTallySet, "ChangeSettings", 4096, NULL, 1,NULL, 1);
   xTaskCreatePinnedToCore(TaskButtonController, "ButtonController", 4096, NULL, 1,NULL, 1);
   
   // xQueueConnectWiFiに値を送信することでTaskConnectToWiFiを開始する
