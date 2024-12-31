@@ -9,7 +9,7 @@
 // TODO: コマンドの共通化(class?)
 struct VMixCommandFunction {
   String Function;
-  String Query;
+  String Query; // TODO: これはどうするか? 配列?
 };
 
 enum class Screen {
@@ -37,7 +37,7 @@ enum Tally {
 // queue related
 QueueHandle_t xQueueConnectWiFi = xQueueCreate( 1, sizeof( int8_t ) );
 QueueHandle_t xQueueConnectVMix = xQueueCreate( 1, sizeof( int8_t ) );
-QueueHandle_t xQueueVMixSendFunction = xQueueCreate( 1, sizeof( VMixCommandFunction ) );
+QueueHandle_t xQueueVMixSendFunction = xQueueCreate( 1, sizeof( VMixCommandFunction * ) );
 QueueHandle_t xQueueShowSettingsQRCode = xQueueCreate( 1, sizeof( int8_t ) );
 QueueHandle_t xQueueShowTally = xQueueCreate( 1, sizeof( Tally ) );
 QueueHandle_t xQueueShowSettings = xQueueCreate( 1, sizeof( int8_t ) );
@@ -161,6 +161,7 @@ static void TaskRetryVmix(void *pvParameters) {
 
 static void TaskButtonController(void *pvParameters) {
   int8_t SendValue = 0;
+  VMixCommandFunction *cmd = new VMixCommandFunction();
   while (1) {
     M5.update();
     xSemaphoreTake(serialSemaphore, portMAX_DELAY);
@@ -169,6 +170,22 @@ static void TaskButtonController(void *pvParameters) {
         if (M5.BtnA.wasPressed()) {
           Serial.println("Button A pressed. Changing to Settings screen...");
           xQueueSend(xQueueShowSettings, &SendValue, portMAX_DELAY);
+        }
+        else if (M5.BtnB.wasPressed()) {
+          cmd->Function = "PreviewInput";
+          cmd->Query.clear();
+          cmd->Query += "Input=" + String(tallyTarget);
+          Serial.println("Button B pressed. Sending Function to vMix API...");
+          Serial.printf("Function: %s Query:%s\n", cmd->Function, cmd->Query);
+          xQueueSend(xQueueVMixSendFunction, &cmd, portMAX_DELAY);
+        }
+        else if (M5.BtnC.wasPressed()) {
+          cmd->Function = "Cut";
+          cmd->Query.clear();
+          // cmd->Query += "Input=" + String(tallyTarget);
+          Serial.println("Button C pressed. Sending Function to vMix API...");
+          Serial.printf("Function: %s Query:%s\n", cmd->Function, cmd->Query);
+          xQueueSend(xQueueVMixSendFunction, &cmd, portMAX_DELAY);
         }
         break;
       case Screen::SETTINGS:
@@ -267,6 +284,38 @@ static void TaskVMixReceiveClient(void *pvParameters) {
   }
 }
 
+static void TaskVMixSendClient(void *pvParameters) {
+  VMixCommandFunction *ReceivedValue;
+  while (1) {
+    if (xQueueReceive(xQueueVMixSendFunction, &ReceivedValue, portMAX_DELAY) != pdPASS){
+      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+      Serial.println("Failed to receive queue");
+      xSemaphoreGive(serialSemaphore);
+      delay(1);
+      continue;
+    }
+
+    // take semaphore
+    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
+    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
+
+    // これはTCP APIに接続されてるかどうかの確認であっているのか？
+    if (vMixConnected){
+      // データ送信処理
+      // tally/activators専用のqueueからデータを受け取り、vMixに送信する
+      Serial.println("Sending data to vMix...");
+      Serial.printf("Function: %s\n", ReceivedValue->Function.c_str());
+      Serial.printf("Query: %s\n", ReceivedValue->Query.c_str());
+      client.printf("FUNCTION %s %s\r\n", ReceivedValue->Function.c_str(), ReceivedValue->Query.c_str());
+    }
+
+    // release semaphore
+    xSemaphoreGive(serialSemaphore);
+    xSemaphoreGive(clientSemaphore);
+
+    delay(1);
+  }
+}
 
 static void TaskConnectVMix(void *pvParameters) {
   auto xLastWakeTime = xTaskGetTickCount();
@@ -336,6 +385,8 @@ static void TaskConnectVMix(void *pvParameters) {
     xSemaphoreGive(clientSemaphore);
 
     xTaskCreatePinnedToCore(TaskVMixReceiveClient, "VMixReceiveClient", 4096, NULL, 1,NULL, 1);
+    xTaskCreatePinnedToCore(TaskVMixSendClient, "VMixSendClient", 4096, NULL, 1, NULL, 1);
+
     delay(1);
   }
 }
@@ -447,35 +498,6 @@ static void TaskConnectToWiFi(void *pvParameters) {
   };
 }
 
-
-static void TaskVMixSendClient(void *pvParameters) {
-  auto xLastWakeTime = xTaskGetTickCount();
-  VMixCommandFunction ReceivedValue;
-  while (1) {
-    if (xQueueReceive(xQueueVMixSendFunction, &ReceivedValue, portMAX_DELAY) != pdPASS){
-      xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-      Serial.println("Failed to receive queue");
-      xSemaphoreGive(serialSemaphore);
-      delay(1);
-      continue;
-    }
-
-    // take semaphore
-    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
-
-    // これはTCP APIに接続されてるかどうかの確認であっているのか？
-    if (client.connected()) {
-      // データ送信処理
-      // tally/activators専用のqueueからデータを受け取り、vMixに送信する
-      client.printf("%s %s\r\n", ReceivedValue.Function.c_str(), ReceivedValue.Query.c_str());
-    }
-
-    // release semaphore
-    xSemaphoreGive(clientSemaphore);
-
-    delay(1);
-  }
-}
 
 static void TaskDNSServer(void *pvParameters) {
   // DNSサーバータスク
