@@ -647,8 +647,6 @@ static void TaskShowTallySet(void *pvParameters) {
       continue;
     }
 
-    Serial.println("Changing Settings");
-
     preferences.begin("vMixTally", false);
     preferences.putUInt("tally", ReceivedValue);
     preferences.end();
@@ -683,8 +681,6 @@ static void TaskShowSettings(void *pvParameters) {
       delay(1);
       continue;
     }
-
-    Serial.println("Showing Settings");
     preferences.begin("vMixTally", false);
     sprite.fillScreen(TFT_BLACK);
     sprite.setTextSize(2);
@@ -748,7 +744,6 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     };
 
     // 画面表示
-    Serial.println("Showing Settings QR Code");
     sprite.fillScreen(TFT_BLACK);
     sprite.setTextColor(WHITE, BLACK);
     sprite.setCursor(0, 0);
