@@ -200,6 +200,8 @@ static void IRAM_ATTR onButtonB() {
       if (tallyTarget < 1) {
         tallyTarget = 1;
       }
+      // TODO: 現在のpreview inputと照合して、タリーに反映する
+      current = Tally::UNKNOWN;
       xQueueSendFromISR(xQueueChangeSettings, (const void *)&tallyTarget, NULL);
       break;
   }
@@ -219,6 +221,8 @@ static void IRAM_ATTR onButtonC() {
       break;
     case Screen::TALLY_SET:
       tallyTarget++;
+      // TODO: 現在のactive inputと照合して、タリーに反映する
+      current = Tally::UNKNOWN;
       xQueueSendFromISR(xQueueChangeSettings, (const void *)&tallyTarget, NULL);
       break;
     case Screen::SETTINGS_QR:
