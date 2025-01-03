@@ -62,6 +62,7 @@ boolean isTargetActive = false;
 boolean isTargetPreview = false;
 bool vMixConnected = false;
 Mode currentMode = Mode::TALLY;
+Tally current = Tally::UNKNOWN;
 
 // utility functions
 Tally parseTallyInt(char c) {
@@ -77,11 +78,26 @@ Tally parseTallyInt(char c) {
   }
 };
 
+// TODO: m5unified-support
+static void printBtnA(String s){
+  sprite.setCursor(40, 220);
+  sprite.print(s);
+}
+
+static void printBtnB(String s){
+  sprite.setCursor(145, 220);
+  sprite.print(s);
+}
+
+static void printBtnC(String s){
+  sprite.setCursor(240, 220);
+  sprite.print(s);
+}
+
 // Task
 
 static void TaskShowTally(void *pvParameters) {
   // Tally表示タスク
-  Tally current = Tally::UNKNOWN;
   Tally ReceivedValue = Tally::UNKNOWN;
   int8_t SendValue = 0;
 
@@ -127,6 +143,10 @@ static void TaskShowTally(void *pvParameters) {
     sprite.printf("PRV: %d\n", previewInput);
     sprite.printf("PGM: %d\n", activeInput);
 
+    printBtnA("SET");
+    printBtnB("Prv");
+    printBtnC("Cut");
+
     sprite.pushSprite(0, 0);
 
     current = ReceivedValue;
@@ -150,13 +170,12 @@ static void TaskRetryVmix(void *pvParameters) {
 }
 
 static void IRAM_ATTR onButtonA() {
-  Tally t = Tally::UNKNOWN;
   switch (currentScreen) {
     case Screen::TALLY:
       xQueueSendFromISR(xQueueShowSettings, NULL, NULL);
       break;
     case Screen::SETTINGS:
-      xQueueSendFromISR(xQueueShowTally, &t, NULL);
+      xQueueSendFromISR(xQueueShowTally, &current, NULL);
       break;
     case Screen::TALLY_SET:
       xQueueSendFromISR(xQueueShowSettings, NULL, NULL);
@@ -202,12 +221,14 @@ static void IRAM_ATTR onButtonC() {
       tallyTarget++;
       xQueueSendFromISR(xQueueChangeSettings, (const void *)&tallyTarget, NULL);
       break;
+    case Screen::SETTINGS_QR:
+      ESP.restart();
+      break;
   }
 }
 
 static void TaskVMixReceiveClient(void *pvParameters) {
   String data;
-  Tally current;
 
   xTaskCreatePinnedToCore(TaskShowTally, "ShowTally", 4096, NULL, 1, &xTaskShowTallyHandle, PRO_CPU_NUM);
 
@@ -226,17 +247,18 @@ static void TaskVMixReceiveClient(void *pvParameters) {
 
     // データ受信・パース処理
     // 受け取ったデータをパースし、tally/activators専用のqueueに送信する
-    // vMixにデータを送るのは別タスクで行う
+    // 処理が重い場合、別のタスクに分割する事を検討する
 
     // TALLY
     if (data.startsWith("TALLY OK")) {
-      // fetch preference
-      preferences.begin("vMixTally", true);
-      tallyTarget = preferences.getUInt("tally");
-      preferences.end();
-
-      data = data.substring(sizeof("TALLY OK"));
       if (currentMode == Mode::TALLY) {
+        // fetch preference
+        preferences.begin("vMixTally", true);
+        tallyTarget = preferences.getUInt("tally");
+        preferences.end();
+
+        data = data.substring(sizeof("TALLY OK"));
+
         current = parseTallyInt(data.charAt(tallyTarget -1));
         // 別の画面にいた場合ignoreする
         if (currentScreen == Screen::TALLY) {
@@ -246,16 +268,13 @@ static void TaskVMixReceiveClient(void *pvParameters) {
     }
 
     // ACTS
-    if (data.startsWith("ACTS OK")) {
+    else if (data.startsWith("ACTS OK")) {
       // parse data
       data = data.substring(sizeof("ACTS OK"));
-      auto splitter = new StringSplitter(data.c_str(), ' ', 3);
-      auto event = splitter->getItemAtIndex(0);
-      auto input = static_cast<uint32_t>(splitter->getItemAtIndex(1).toInt());
-      auto status = splitter->getItemAtIndex(2).toInt();
-      delete splitter;
-
-      // Serial.printf("ACTS OK: event:%s input:%d status:%d\n", event.c_str(), input, status);
+      auto splitter = StringSplitter(data.c_str(), ' ', 3);
+      auto event = splitter.getItemAtIndex(0);
+      auto input = static_cast<uint32_t>(splitter.getItemAtIndex(1).toInt());
+      auto status = splitter.getItemAtIndex(2).toInt();
 
       // update
       if(event == "Input" && status == 1) {
@@ -265,16 +284,16 @@ static void TaskVMixReceiveClient(void *pvParameters) {
         previewInput = input;
       }
 
-      if (input == tallyTarget) {
-        if (event == "Input") {
-          isTargetActive = (status == 1);
-        } else if (event == "InputPreview") {
-          isTargetPreview = (status == 1);
-        }
-      }
-
       // apply tally
       if (currentMode == Mode::ACTS) {
+        if (input == tallyTarget) {
+          if (event == "Input") {
+            isTargetActive = (status == 1);
+          } else if (event == "InputPreview") {
+            isTargetPreview = (status == 1);
+          }
+        }
+
         if (isTargetActive) {
           current = Tally::PGM;
         } else if (isTargetPreview) {
@@ -313,21 +332,6 @@ static void TaskVMixSendClient(void *pvParameters) {
   }
 }
 
-static void printBtnA(String s){
-  sprite.setCursor(40, 220);
-  sprite.print(s);
-}
-
-static void printBtnB(String s){
-  sprite.setCursor(145, 220);
-  sprite.print(s);
-}
-
-static void printBtnC(String s){
-  sprite.setCursor(240, 220);
-  sprite.print(s);
-}
-
 static void TaskConnectVMix(void *pvParameters) {
   const Tally tally = Tally::DISCONNECTED;
 
@@ -364,7 +368,10 @@ static void TaskConnectVMix(void *pvParameters) {
 
     // Subscribe to the tally events
     client.println("SUBSCRIBE TALLY");
+    client.println("TALLY");
     client.println("SUBSCRIBE ACTS");
+    client.println("ACTS Input");
+    client.println("ACTS InputPreview");
     delay(1);
 
     xTaskCreatePinnedToCore(TaskVMixReceiveClient, "VMixReceiveClient", 4096, NULL, 1,NULL, PRO_CPU_NUM);
@@ -654,6 +661,9 @@ static void TaskShowTallySet(void *pvParameters) {
     sprite.println("vMix");
     sprite.printf("  TALLY TARGET: %d\n", tallyTarget);
     sprite.println();
+    printBtnA("BACK");
+    printBtnB("-");
+    printBtnC("+");
     sprite.pushSprite(0, 0);
 
     currentScreen = Screen::TALLY_SET;
@@ -689,6 +699,9 @@ static void TaskShowSettings(void *pvParameters) {
     sprite.printf("  SSID: %s\n", preferences.getString("wifi_ssid").c_str()); 
     sprite.printf("  Password: %s\n", preferences.getString("wifi_pass").c_str());
     sprite.println();
+    printBtnA("BACK");
+    printBtnB("EDIT");
+    printBtnC("QR");
     sprite.pushSprite(0, 0);
     
     preferences.end();
@@ -738,6 +751,7 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     sprite.println();
     sprite.println("Scan QR Code to configure");
     sprite.printf("  SSID:%s\n PW:%s\n", ssid, password);
+    printBtnC("RESET");
     sprite.pushSprite(0, 0);
 
     // TODO: Split method / destructor
