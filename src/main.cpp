@@ -4,6 +4,7 @@
 #include <DNSserver.h>
 #include <Webserver.h>
 #include <Ministache.h>
+#include <StringSplitter.h>
 
 // type definitions
 // TODO: コマンドの共通化(class?)
@@ -55,7 +56,12 @@ M5Canvas sprite(&M5.Lcd);
 // state
 volatile Screen currentScreen = Screen::TALLY;
 volatile uint32_t tallyTarget = 1;
+uint32_t previewInput = 0;
+uint32_t activeInput = 0;
+boolean isTargetActive = false;
+boolean isTargetPreview = false;
 bool vMixConnected = false;
+Mode currentMode = Mode::TALLY;
 
 // utility functions
 Tally parseTallyInt(char c) {
@@ -93,33 +99,33 @@ static void TaskShowTally(void *pvParameters) {
         sprite.fillSprite(TFT_BLACK);
         sprite.setTextColor(TFT_WHITE);
         sprite.drawCentreString("SAFE", sprite.width()/2, sprite.height()/2, 5);
-        Serial.println("SAFE");
         break;
       case Tally::PGM:
         sprite.fillSprite(TFT_RED);
         sprite.setTextColor(TFT_WHITE);
         sprite.drawCentreString("PGM", sprite.width()/2, sprite.height()/2, 5);
-        Serial.println("PGM");
         break;
       case Tally::PRV:
         sprite.fillSprite(TFT_GREEN);
         sprite.setTextColor(TFT_BLACK);
         sprite.drawCentreString("PRV", sprite.width()/2, sprite.height()/2, 5);
-        Serial.println("PRV");
         break;
       case Tally::UNKNOWN:
         sprite.fillSprite(TFT_WHITE);
         sprite.setTextColor(TFT_BLACK);
         sprite.drawCentreString("UNKNOWN", sprite.width()/2, sprite.height()/2, 5);
-        Serial.println("UNKNOWN");
         break;
       case Tally::DISCONNECTED:
         sprite.fillSprite(TFT_DARKGRAY);
         sprite.setTextColor(TFT_WHITE);
         sprite.drawCentreString("DC", sprite.width()/2, sprite.height()/2, 5);
-        Serial.println("DISCONNECTED...");
         break;
     }
+    sprite.setCursor(0, 0);
+    sprite.setTextSize(2);
+    sprite.printf("TGT: %d\n", tallyTarget);
+    sprite.printf("PRV: %d\n", previewInput);
+    sprite.printf("PGM: %d\n", activeInput);
 
     sprite.pushSprite(0, 0);
 
@@ -172,6 +178,9 @@ static void IRAM_ATTR onButtonB() {
       break;
     case Screen::TALLY_SET:
       tallyTarget--;
+      if (tallyTarget < 1) {
+        tallyTarget = 1;
+      }
       xQueueSendFromISR(xQueueChangeSettings, (const void *)&tallyTarget, NULL);
       break;
   }
@@ -213,13 +222,12 @@ static void TaskVMixReceiveClient(void *pvParameters) {
       continue;
     }
     data = client.readStringUntil('\r\n');
-    Serial.printf("Received data from vMix: %s\n", data.c_str());
+    // Serial.printf("Received data from vMix: %s\n", data.c_str());
 
     // データ受信・パース処理
     // 受け取ったデータをパースし、tally/activators専用のqueueに送信する
     // vMixにデータを送るのは別タスクで行う
 
-    // TODO: Modeによって処理を分ける
     // TALLY
     if (data.startsWith("TALLY OK")) {
       // fetch preference
@@ -228,16 +236,56 @@ static void TaskVMixReceiveClient(void *pvParameters) {
       preferences.end();
 
       data = data.substring(sizeof("TALLY OK"));
-      current = parseTallyInt(data.charAt(tallyTarget -1));
-      // 別の画面にいた場合ignoreする
-      if (currentScreen == Screen::TALLY) {
-        xQueueSend(xQueueShowTally, &current, portMAX_DELAY);
+      if (currentMode == Mode::TALLY) {
+        current = parseTallyInt(data.charAt(tallyTarget -1));
+        // 別の画面にいた場合ignoreする
+        if (currentScreen == Screen::TALLY) {
+          xQueueSend(xQueueShowTally, &current, portMAX_DELAY);
+        }
       }
     }
 
     // ACTS
     if (data.startsWith("ACTS OK")) {
-      // TODO...
+      // parse data
+      data = data.substring(sizeof("ACTS OK"));
+      auto splitter = new StringSplitter(data.c_str(), ' ', 3);
+      auto event = splitter->getItemAtIndex(0);
+      auto input = static_cast<uint32_t>(splitter->getItemAtIndex(1).toInt());
+      auto status = splitter->getItemAtIndex(2).toInt();
+      delete splitter;
+
+      // Serial.printf("ACTS OK: event:%s input:%d status:%d\n", event.c_str(), input, status);
+
+      // update
+      if(event == "Input" && status == 1) {
+        activeInput = input;
+      }
+      else if(event == "InputPreview" && status == 1) {
+        previewInput = input;
+      }
+
+      if (input == tallyTarget) {
+        if (event == "Input") {
+          isTargetActive = (status == 1);
+        } else if (event == "InputPreview") {
+          isTargetPreview = (status == 1);
+        }
+      }
+
+      // apply tally
+      if (currentMode == Mode::ACTS) {
+        if (isTargetActive) {
+          current = Tally::PGM;
+        } else if (isTargetPreview) {
+          current = Tally::PRV;
+        } else{
+          current = Tally::SAFE;
+        }
+        if (currentScreen == Screen::TALLY) {
+          xQueueSend(xQueueShowTally, &current, portMAX_DELAY);
+        }
+      }
     }
 
     delay(1);
@@ -252,14 +300,10 @@ static void TaskVMixSendClient(void *pvParameters) {
       continue;
     }
 
-    Serial.println("Sending data to vMix...");
-
     // これはTCP APIに接続されてるかどうかの確認であっているのか？
     if (vMixConnected){
       // データ送信処理
       // tally/activators専用のqueueからデータを受け取り、vMixに送信する
-      Serial.printf("Function: %s\n", ReceivedValue->Function.c_str());
-      Serial.printf("Query: %s\n", ReceivedValue->Query.c_str());
       client.printf("FUNCTION %s %s\r\n", ReceivedValue->Function.c_str(), ReceivedValue->Query.c_str());
     } else {
       Serial.println("TaskVMixSendClient failed. vMix not connected");
@@ -741,8 +785,8 @@ void setup() {
   // tasks
   xTaskCreatePinnedToCore(TaskConnectToWiFi, "ConnectToWiFi", 4096, NULL, 1,NULL, PRO_CPU_NUM);
   xTaskCreatePinnedToCore(TaskShowSetingsQRCode, "ShowSettingsQRCode", 4096, NULL, 1,NULL, PRO_CPU_NUM);
-  xTaskCreatePinnedToCore(TaskShowSettings, "ShowSettings", 4096, NULL, 1,NULL, PRO_CPU_NUM);
-  xTaskCreatePinnedToCore(TaskShowTallySet, "ChangeSettings", 4096, NULL, 1,NULL, PRO_CPU_NUM);
+  xTaskCreatePinnedToCore(TaskShowSettings, "ShowSettings", 4096, NULL, 1,NULL, APP_CPU_NUM);
+  xTaskCreatePinnedToCore(TaskShowTallySet, "ChangeSettings", 4096, NULL, 1,NULL, APP_CPU_NUM);
   
   // button
   attachInterrupt(39, onButtonA, FALLING);
