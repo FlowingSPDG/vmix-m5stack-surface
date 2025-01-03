@@ -42,11 +42,6 @@ QueueHandle_t xQueueShowSettingsQRCode = xQueueCreate( 1, 0 );
 volatile QueueHandle_t xQueueShowTally = xQueueCreate( 1, sizeof( Tally ) );
 volatile QueueHandle_t xQueueShowSettings = xQueueCreate( 1, 0 );
 QueueHandle_t xQueueChangeSettings = xQueueCreate( 1, sizeof( uint32_t ) );
-SemaphoreHandle_t preferencesSemaphore = xSemaphoreCreateMutex();
-SemaphoreHandle_t serialSemaphore = xSemaphoreCreateMutex();
-SemaphoreHandle_t spriteSemaphore = xSemaphoreCreateMutex();
-SemaphoreHandle_t clientSemaphore = xSemaphoreCreateMutex();
-SemaphoreHandle_t xSemaphoreWiFi = xSemaphoreCreateMutex();
 TaskHandle_t xTaskShowTallyHandle;
 TaskHandle_t xTaskRetryVmixHandle;
 TaskHandle_t xTaskConnectVMixHandle;
@@ -92,10 +87,6 @@ static void TaskShowTally(void *pvParameters) {
     
     // TODO: 二重描画対策...
 
-    // take semaphore
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
-
     sprite.setTextSize(5);
     switch (ReceivedValue){
       case Tally::SAFE:
@@ -131,10 +122,6 @@ static void TaskShowTally(void *pvParameters) {
     }
 
     sprite.pushSprite(0, 0);
-
-    // release semaphore
-    xSemaphoreGive(serialSemaphore);
-    xSemaphoreGive(spriteSemaphore);
 
     current = ReceivedValue;
     currentScreen = Screen::TALLY;
@@ -225,10 +212,6 @@ static void TaskVMixReceiveClient(void *pvParameters) {
       delay(1);
       continue;
     }
-    // take semaphore
-    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
     data = client.readStringUntil('\r\n');
     Serial.printf("Received data from vMix: %s\n", data.c_str());
 
@@ -257,11 +240,6 @@ static void TaskVMixReceiveClient(void *pvParameters) {
       // TODO...
     }
 
-    // release semaphore
-    xSemaphoreGive(clientSemaphore);
-    xSemaphoreGive(serialSemaphore);
-    xSemaphoreGive(preferencesSemaphore);
-
     delay(1);
   }
 }
@@ -273,10 +251,6 @@ static void TaskVMixSendClient(void *pvParameters) {
       delay(1);
       continue;
     }
-
-    // take semaphore
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
 
     Serial.println("Sending data to vMix...");
 
@@ -290,10 +264,6 @@ static void TaskVMixSendClient(void *pvParameters) {
     } else {
       Serial.println("TaskVMixSendClient failed. vMix not connected");
     }
-
-    // release semaphore
-    xSemaphoreGive(serialSemaphore);
-    xSemaphoreGive(clientSemaphore);
 
     delay(1);
   }
@@ -317,46 +287,27 @@ static void printBtnC(String s){
 static void TaskConnectVMix(void *pvParameters) {
   const Tally tally = Tally::DISCONNECTED;
 
-  // take semaphore
-  xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
-  xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-
   preferences.begin("vMixTally", true);
   auto VMIX_IP = preferences.getString("vmix_ip"); 
   preferences.end();
 
   Serial.printf("VMIX_IP:%s\n", VMIX_IP.c_str());
 
-  // release semaphore
-  xSemaphoreGive(preferencesSemaphore);
-  xSemaphoreGive(serialSemaphore);
-
   while(1){
     if (xQueueReceive(xQueueConnectVMix, NULL, portMAX_DELAY) != pdPASS){
       delay(1);
       continue;
     }
-
-    // take semaphore
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    xSemaphoreTake(clientSemaphore, portMAX_DELAY);
     
     Serial.println("Connecting to vMix...");
     
     if (vMixConnected) {
       Serial.println("Already connected to vMix");
-      // release semaphore
-      xSemaphoreGive(serialSemaphore);
-      xSemaphoreGive(clientSemaphore);
       delay(1);
       continue;
     }
     if (!client.connect(VMIX_IP.c_str(), 8099, 50)){
       Serial.println("Failed to connect to vMix");
-
-      // release semaphore
-      xSemaphoreGive(serialSemaphore);
-      xSemaphoreGive(clientSemaphore);
       vMixConnected = false;
       delay(1);
       continue;
@@ -372,10 +323,6 @@ static void TaskConnectVMix(void *pvParameters) {
     client.println("SUBSCRIBE ACTS");
     delay(1);
 
-    // release semaphore
-    xSemaphoreGive(serialSemaphore);
-    xSemaphoreGive(clientSemaphore);
-
     xTaskCreatePinnedToCore(TaskVMixReceiveClient, "VMixReceiveClient", 4096, NULL, 1,NULL, PRO_CPU_NUM);
     xTaskCreatePinnedToCore(TaskVMixSendClient, "VMixSendClient", 4096, NULL, 1, NULL, PRO_CPU_NUM);
 
@@ -385,9 +332,6 @@ static void TaskConnectVMix(void *pvParameters) {
 
 
 static void TaskConnectToWiFi(void *pvParameters) {
-  // take semaphore
-  xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-  xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
 
   // WiFiへ接続し、完了したら自身を削除する
   // 失敗した場合、設定用QRコード表示タスクへ切り替える
@@ -399,10 +343,6 @@ static void TaskConnectToWiFi(void *pvParameters) {
   Serial.printf("WIFI_SSID:%s\n", WIFI_SSID.c_str());
   Serial.printf("WIFI_PASS:%s\n", WIFI_PASS.c_str());
 
-  // release semaphore
-  xSemaphoreGive(preferencesSemaphore);
-  xSemaphoreGive(serialSemaphore);
-
   int retry = 0;
   int vMixRetry = 5;
   
@@ -413,11 +353,6 @@ static void TaskConnectToWiFi(void *pvParameters) {
       delay(1);
       continue;
     }
-
-    // take semaphore
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    xSemaphoreTake(xSemaphoreWiFi, portMAX_DELAY);
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
 
     Serial.println("Connecting to WiFi...");
 
@@ -449,9 +384,6 @@ static void TaskConnectToWiFi(void *pvParameters) {
     }
 
     if (!isWiFiConnected && !shouldRetry){
-      xSemaphoreGive(spriteSemaphore);
-      xSemaphoreGive(xSemaphoreWiFi);
-      xSemaphoreGive(serialSemaphore);
       delay(1);
       continue;
     };
@@ -460,11 +392,6 @@ static void TaskConnectToWiFi(void *pvParameters) {
     sprite.pushSprite(0, 0);
 
     Serial.println("Connected to WiFi");
-
-    // release semaphore
-    xSemaphoreGive(spriteSemaphore);
-    xSemaphoreGive(xSemaphoreWiFi);
-    xSemaphoreGive(serialSemaphore);
 
     // Start vMix task
     xTaskCreatePinnedToCore(TaskConnectVMix, "ConnectVMix", 4096, NULL, 1, &xTaskConnectVMixHandle, PRO_CPU_NUM);
@@ -489,16 +416,12 @@ static void TaskDNSServer(void *pvParameters) {
   DNSServer dnsServer;
 
   while (!dnsServer.start(53, "*", WiFi.softAPIP())){
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
     Serial.println("Failed to start DNS server!");
-    xSemaphoreGive(serialSemaphore);
     delay(1);
     continue;
   }
 
-  xSemaphoreTake(serialSemaphore, portMAX_DELAY);
   Serial.println("DNS server started!");
-  xSemaphoreGive(serialSemaphore);
 
   while(true){
     dnsServer.processNextRequest();
@@ -637,18 +560,14 @@ static void TaskHTTPServer(void *pvParameters) {
   });
   // APIs...
   server.on("/settings", HTTP_POST, [&]() {
-    xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
     preferences.begin("vMixTally", false);
     preferences.putString("vmix_ip", server.arg("ip"));
     preferences.putString("wifi_ssid", server.arg("ssid"));
     preferences.putString("wifi_pass", server.arg("password"));
     preferences.end();
-    xSemaphoreGive(preferencesSemaphore);
 
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
     Serial.printf("Settings saved: %s, %s, %s\n", server.arg("ip").c_str(), server.arg("ssid").c_str(), server.arg("password").c_str());
-    xSemaphoreGive(serialSemaphore);
-
+    
     server.send(200, "text/plain", "Success");
 
     ESP.restart();
@@ -673,11 +592,6 @@ static void TaskShowTallySet(void *pvParameters) {
       continue;
     }
 
-    // take semaphore
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
-
     Serial.println("Changing Settings");
 
     preferences.begin("vMixTally", false);
@@ -697,11 +611,6 @@ static void TaskShowTallySet(void *pvParameters) {
     sprite.printf("  TALLY TARGET: %d\n", tallyTarget);
     sprite.println();
     sprite.pushSprite(0, 0);
-    
-    // release semaphore
-    xSemaphoreGive(serialSemaphore);
-    xSemaphoreGive(preferencesSemaphore);
-    xSemaphoreGive(spriteSemaphore);
 
     currentScreen = Screen::TALLY_SET;
 
@@ -716,11 +625,6 @@ static void TaskShowSettings(void *pvParameters) {
       delay(1);
       continue;
     }
-
-    // take semaphore
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
-    xSemaphoreTake(preferencesSemaphore, portMAX_DELAY);
 
     Serial.println("Showing Settings");
     preferences.begin("vMixTally", false);
@@ -745,11 +649,6 @@ static void TaskShowSettings(void *pvParameters) {
     
     preferences.end();
 
-    // release semaphore
-    xSemaphoreGive(serialSemaphore);
-    xSemaphoreGive(spriteSemaphore);
-    xSemaphoreGive(preferencesSemaphore);
-
     currentScreen = Screen::SETTINGS;
 
     delay(1);
@@ -765,11 +664,6 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
       continue;
     }
 
-    // take semaphore
-    xSemaphoreTake(serialSemaphore, portMAX_DELAY);
-    xSemaphoreTake(spriteSemaphore, portMAX_DELAY);
-    xSemaphoreTake(xSemaphoreWiFi, portMAX_DELAY);
-
     WiFi.disconnect();
     Serial.println("Starting WiFi AP...");
     WiFi.mode(WIFI_AP);
@@ -779,9 +673,6 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     if (!WiFi.softAP(ssid, password)) {
       sprite.println("failed to start WiFi AP");
       sprite.pushSprite(0, 0);
-      xSemaphoreGive(serialSemaphore);
-      xSemaphoreGive(spriteSemaphore);
-      xSemaphoreGive(xSemaphoreWiFi);
       continue;
     }
     delay(300);
@@ -792,9 +683,6 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
       sprite.println("WiFi AP configuration failed");
       sprite.pushSprite(0, 0);
-      xSemaphoreGive(serialSemaphore);
-      xSemaphoreGive(spriteSemaphore);
-      xSemaphoreGive(xSemaphoreWiFi);
       continue;
     };
 
@@ -819,11 +707,6 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     auto width = sprite.width()/3;
     sprite.qrcode(buf, 0, (sprite.width()/2)-(width/2), width, 3);
     sprite.pushSprite(0, 0);
-
-    // release semaphore
-    xSemaphoreGive(serialSemaphore);
-    xSemaphoreGive(spriteSemaphore);
-    xSemaphoreGive(xSemaphoreWiFi);
 
     // HTTP/DNSサーバーを起動
     vTaskDelete(xTaskConnectVMixHandle);
