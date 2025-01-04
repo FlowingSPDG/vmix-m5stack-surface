@@ -106,7 +106,7 @@ static void TaskShowTally(void *pvParameters) {
   int8_t SendValue = 0;
 
   while (1) {
-    if (xQueueReceive(xQueueShowTally, &ReceivedValue, portMAX_DELAY) != pdPASS){
+    if (xQueueReceive(xQueueShowTally, &ReceivedValue, portMAX_DELAY) != pdTRUE){
       delay(1);
       continue;
     }
@@ -320,7 +320,7 @@ static void TaskVMixReceiveClient(void *pvParameters) {
 static void TaskVMixSendClient(void *pvParameters) {
   VMixCommandFunction *ReceivedValue;
   while (1) {
-    if (xQueueReceive(xQueueVMixSendFunction, &ReceivedValue, portMAX_DELAY) != pdPASS){
+    if (xQueueReceive(xQueueVMixSendFunction, &ReceivedValue, portMAX_DELAY) != pdTRUE){
       delay(1);
       continue;
     }
@@ -348,7 +348,7 @@ static void TaskConnectVMix(void *pvParameters) {
   Serial.printf("VMIX_IP:%s\n", VMIX_IP.c_str());
 
   while(1){
-    if (xQueueReceive(xQueueConnectVMix, NULL, portMAX_DELAY) != pdPASS){
+    if (xQueueReceive(xQueueConnectVMix, NULL, portMAX_DELAY) != pdTRUE){
       delay(1);
       continue;
     }
@@ -406,7 +406,7 @@ static void TaskConnectToWiFi(void *pvParameters) {
   bool shouldRetry = true;
   bool isWiFiConnected = false;
   while(1){
-    if (xQueueReceive(xQueueConnectWiFi, NULL, portMAX_DELAY) != pdPASS){
+    if (xQueueReceive(xQueueConnectWiFi, NULL, portMAX_DELAY) != pdTRUE){
       delay(1);
       continue;
     }
@@ -416,7 +416,7 @@ static void TaskConnectToWiFi(void *pvParameters) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     while (shouldRetry && !isWiFiConnected){
-      if (xQueueReceive(xQueueSuspendWiFiRetry, NULL, 100 * portTICK_PERIOD_MS) == pdPASS){
+      if (xQueueReceive(xQueueSuspendWiFiRetry, NULL, 100 * portTICK_PERIOD_MS) == pdTRUE){
         shouldRetry = false;
         isWiFiConnected = false;
         delay(1);
@@ -637,7 +637,7 @@ static void TaskShowTallySet(void *pvParameters) {
   // 画面を更新(入力はButtonControllerで行う)
   uint32_t ReceivedValue = 0;
   while (1) {
-    if (xQueueReceive(xQueueChangeSettings, &ReceivedValue, portMAX_DELAY) != pdPASS){
+    if (xQueueReceive(xQueueChangeSettings, &ReceivedValue, portMAX_DELAY) != pdTRUE){
       delay(1);
       continue;
     }
@@ -672,7 +672,7 @@ static void TaskShowTallySet(void *pvParameters) {
 static void TaskShowSettings(void *pvParameters) {
   // 設定画面表示タスク
   while (1) {
-    if (xQueueReceive(xQueueShowSettings, NULL, portMAX_DELAY) != pdPASS){
+    if (xQueueReceive(xQueueShowSettings, NULL, portMAX_DELAY) != pdTRUE){
       delay(1);
       continue;
     }
@@ -711,7 +711,7 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
   // QRコード表示タスク
   // WiFiをAPとしてスタートし、接続用QRコードを表示する
   while (1) {
-    if (xQueueReceive(xQueueShowSettingsQRCode, NULL, portMAX_DELAY) != pdPASS){
+    if (xQueueReceive(xQueueShowSettingsQRCode, NULL, portMAX_DELAY) != pdTRUE){
       delay(1);
       continue;
     }
