@@ -66,6 +66,7 @@ boolean isTargetPreview = false;
 bool vMixConnected = false;
 Mode currentMode = Mode::TALLY;
 Tally current = Tally::UNKNOWN;
+VMixCommandFunction *cmd = new VMixCommandFunction();
 
 // utility functions
 Tally parseTallyInt(char c) {
@@ -187,7 +188,6 @@ static void IRAM_ATTR onButtonA() {
 }
 
 static void IRAM_ATTR onButtonB() {
-  VMixCommandFunction *cmd = new VMixCommandFunction();
   switch (currentScreen) {
     case Screen::TALLY:
       cmd->Function = "PreviewInput";
@@ -211,7 +211,6 @@ static void IRAM_ATTR onButtonB() {
 }
 
 static void IRAM_ATTR onButtonC() {
-  VMixCommandFunction *cmd = new VMixCommandFunction();
   switch (currentScreen) {
     case Screen::TALLY:
       cmd->Function = "Cut";
@@ -451,6 +450,8 @@ static void TaskConnectToWiFi(void *pvParameters) {
       delay(1);
       continue;
     };
+
+    // TODO: Initialize AsyncClient here...
 
     sprite.println("Connected to WiFi");
     sprite.pushSprite(0, 0);
