@@ -2,7 +2,7 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <DNSserver.h>
-#include <Webserver.h>
+#include <ESPAsyncWebServer.h>
 #include <Ministache.h>
 #include <StringSplitter.h>
 
@@ -37,6 +37,7 @@ enum Tally {
 
 // queue related
 QueueHandle_t xQueueConnectWiFi = xQueueCreate( 1, 0 );
+QueueHandle_t xQueueSuspendWiFiRetry = xQueueCreate( 1, 0 );
 QueueHandle_t xQueueConnectVMix = xQueueCreate( 1, 0 );
 QueueHandle_t xQueueVMixSendFunction = xQueueCreate( 1, sizeof( VMixCommandFunction * ) );
 QueueHandle_t xQueueShowSettingsQRCode = xQueueCreate( 1, 0 );
@@ -46,11 +47,13 @@ QueueHandle_t xQueueChangeSettings = xQueueCreate( 1, sizeof( uint32_t ) );
 TaskHandle_t xTaskShowTallyHandle;
 TaskHandle_t xTaskRetryVmixHandle;
 TaskHandle_t xTaskConnectVMixHandle;
+TaskHandle_t xTaskHTTPServerHandle;
+TaskHandle_t xTaskDNSServerHandle;
+TaskHandle_t xTaskConnectWiFiHandle;
 
 // instance
 WiFiClient client;
 Preferences preferences;
-WebServer server;
 M5Canvas sprite(&M5.Lcd);
 
 // state
@@ -414,6 +417,12 @@ static void TaskConnectToWiFi(void *pvParameters) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     while (shouldRetry && !isWiFiConnected){
+      if (xQueueReceive(xQueueSuspendWiFiRetry, NULL, 100 * portTICK_PERIOD_MS) == pdPASS){
+        shouldRetry = false;
+        isWiFiConnected = false;
+        delay(1);
+        break;
+      }
       if (WiFi.status() == WL_CONNECTED){
         shouldRetry = false;
         isWiFiConnected = true;
@@ -470,12 +479,12 @@ static void TaskDNSServer(void *pvParameters) {
   // DNSサーバータスク
   DNSServer dnsServer;
 
+  Serial.println("Starting DNS server...");
   while (!dnsServer.start(53, "*", WiFi.softAPIP())){
     Serial.println("Failed to start DNS server!");
     delay(1);
     continue;
   }
-
   Serial.println("DNS server started!");
 
   while(true){
@@ -484,7 +493,7 @@ static void TaskDNSServer(void *pvParameters) {
   }
 }
 
-void handleCaptivePortal() {
+void handleCaptivePortal(AsyncWebServerRequest *request) {
   static const char captivePortalTemplateHTML[] = R"===(
 <!DOCTYPE html>
 <html lang="ja">
@@ -570,6 +579,7 @@ void handleCaptivePortal() {
 
 )===";
 
+  Serial.println("Captive portal requested. Started rendering...");
   preferences.begin("vMixTally", true);
   JsonDocument data;
   data["vmix_ip"] = preferences.getString("vmix_ip");
@@ -577,61 +587,45 @@ void handleCaptivePortal() {
   data["wifi_password"] = preferences.getString("wifi_pass");
   preferences.end();
   auto resp = ministache::render(captivePortalTemplateHTML, data);
-  server.send(200, "text/html", resp);
+  request->send(200, "text/html", resp);
+  Serial.println("Captive portal rendered.");
 };
 
 static void TaskHTTPServer(void *pvParameters) {
   // captive portal...
-  server.on("/hotspot-detect.html", [&]() {
-    handleCaptivePortal();
-  });
-  server.on("/generate_204", [&]() {
-    handleCaptivePortal();
-  });
-  server.on("/portal", [&]() {
-    handleCaptivePortal();
-  });
-  server.on("/connecttest.txt", [&]() {
-    handleCaptivePortal(); 
-  });
-  server.on("/redirect", [&]() {
-    handleCaptivePortal();
-  });
-  server.on("/success.txt", [&]() {
-    handleCaptivePortal();
-  });
-  server.on("/wpad.dat", [&]() {
-    handleCaptivePortal();
-  });
-  server.on("/ncsi.txt", [&]() {
-    handleCaptivePortal();
-  });
-  server.on("/fwlink", [&]() {
-    handleCaptivePortal();
-  });
-  server.onNotFound([&]() {
-    server.sendHeader("Location", "/portal");
-    server.send(302, "text/plain", "redirect to captive portal");
+  AsyncWebServer server(80);
+  server.on("/hotspot-detect.html", handleCaptivePortal);
+  server.on("/generate_204", handleCaptivePortal);
+  server.on("/portal", handleCaptivePortal);
+  server.on("/connecttest.txt", handleCaptivePortal);
+  server.on("/redirect", handleCaptivePortal);
+  server.on("/success.txt", handleCaptivePortal);
+  server.on("/wpad.dat", handleCaptivePortal);
+  server.on("/ncsi.txt", handleCaptivePortal);
+  server.on("/fwlink", handleCaptivePortal);
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    request->redirect("/portal");
   });
   // APIs...
-  server.on("/settings", HTTP_POST, [&]() {
+  server.on("/settings", HTTP_POST, [](AsyncWebServerRequest *request) {
     preferences.begin("vMixTally", false);
-    preferences.putString("vmix_ip", server.arg("ip"));
-    preferences.putString("wifi_ssid", server.arg("ssid"));
-    preferences.putString("wifi_pass", server.arg("password"));
+    preferences.putString("vmix_ip", request->arg("ip"));
+    preferences.putString("wifi_ssid", request->arg("ssid"));
+    preferences.putString("wifi_pass", request->arg("password"));
     preferences.end();
 
-    Serial.printf("Settings saved: %s, %s, %s\n", server.arg("ip").c_str(), server.arg("ssid").c_str(), server.arg("password").c_str());
+    Serial.printf("Settings saved: %s, %s, %s\n", request->arg("ip").c_str(), request->arg("ssid").c_str(), request->arg("password").c_str());
     
-    server.send(200, "text/plain", "Success");
+    request->send(200, "text/plain", "Success");
 
     ESP.restart();
   });
 
   server.begin();
 
-  while (true) {
-    server.handleClient();
+  Serial.println("HTTP server started!");
+
+  while(true){
     delay(1);
   }
 }
@@ -723,28 +717,28 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
 
     WiFi.disconnect();
     Serial.println("Starting WiFi AP...");
-    WiFi.mode(WIFI_AP);
+    while (!WiFi.mode(WIFI_AP)) {
+      delay(1);
+    }
     const char *ssid = "vMixTally";
     const char *password = "vMixTally";
     // TODO: use generated ssid and password instead
-    if (!WiFi.softAP(ssid, password)) {
-      sprite.println("failed to start WiFi AP");
-      sprite.pushSprite(0, 0);
-      continue;
+    while (!WiFi.softAP(ssid, password)) {
+      Serial.println("failed to start WiFi AP. Retrying...");
     }
     delay(300);
     // Fixed IPs
     IPAddress local_IP(192, 168, 4,22);
     IPAddress subnet(255, 255, 255,0); 
-    if (!WiFi.softAPConfig(local_IP, local_IP, subnet)) {
-      sprite.println("WiFi AP configuration failed");
-      sprite.pushSprite(0, 0);
-      continue;
+    while (!WiFi.softAPConfig(local_IP, local_IP, subnet)) {
+      Serial.println("WiFi AP configuration failed. Retrying...");
     };
+    Serial.println("WiFi AP started!");
 
     // 画面表示
     sprite.fillScreen(TFT_BLACK);
     sprite.setTextColor(WHITE, BLACK);
+    sprite.setTextSize(2);
     sprite.setCursor(0, 0);
     sprite.println();
     sprite.println("Scan QR Code to configure");
@@ -764,10 +758,17 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     sprite.qrcode(buf, 0, (sprite.width()/2)-(width/2), width, 3);
     sprite.pushSprite(0, 0);
 
+    // TODO: WiFi APの停止処理
+    if (xTaskConnectWiFiHandle != NULL){
+      xQueueSend(xQueueSuspendWiFiRetry, NULL, 1000 * portTICK_RATE_MS);
+    }
+    
+
     // HTTP/DNSサーバーを起動
-    vTaskDelete(xTaskConnectVMixHandle);
-    xTaskCreatePinnedToCore(TaskDNSServer, "DNSServer", 4096, NULL, 1,NULL, PRO_CPU_NUM);
-    xTaskCreatePinnedToCore(TaskHTTPServer, "HTTPServer", 4096, NULL, 1,NULL, PRO_CPU_NUM);
+    Serial.println("Starting HTTP/DNS server...");
+    xTaskCreatePinnedToCore(TaskDNSServer, "DNSServer", 4096, NULL, 1, &xTaskDNSServerHandle, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(TaskHTTPServer, "HTTPServer", 4096, NULL, 1, &xTaskHTTPServerHandle, APP_CPU_NUM);
+    Serial.println("HTTP/DNS server started!");
 
     // captivePortalについて
     // なぜか実際に開かれるまでかかる時間が非常に長い...
@@ -795,10 +796,10 @@ void setup() {
   }
 
   // tasks
-  xTaskCreatePinnedToCore(TaskConnectToWiFi, "ConnectToWiFi", 4096, NULL, 1,NULL, PRO_CPU_NUM);
-  xTaskCreatePinnedToCore(TaskShowSetingsQRCode, "ShowSettingsQRCode", 4096, NULL, 1,NULL, APP_CPU_NUM);
-  xTaskCreatePinnedToCore(TaskShowSettings, "ShowSettings", 4096, NULL, 1,NULL, APP_CPU_NUM);
-  xTaskCreatePinnedToCore(TaskShowTallySet, "ChangeSettings", 4096, NULL, 1,NULL, APP_CPU_NUM);
+  xTaskCreatePinnedToCore(TaskConnectToWiFi, "ConnectToWiFi", 4096, NULL, 1, &xTaskConnectWiFiHandle, PRO_CPU_NUM);
+  xTaskCreatePinnedToCore(TaskShowSetingsQRCode, "ShowSettingsQRCode", 4096, NULL, 1, NULL, APP_CPU_NUM);
+  xTaskCreatePinnedToCore(TaskShowSettings, "ShowSettings", 4096, NULL, 1, NULL, APP_CPU_NUM);
+  xTaskCreatePinnedToCore(TaskShowTallySet, "ChangeSettings", 4096, NULL, 1, NULL, APP_CPU_NUM);
   
   // button
   attachInterrupt(39, onButtonA, FALLING);
@@ -807,6 +808,9 @@ void setup() {
 
   // xQueueConnectWiFiに値を送信することでTaskConnectToWiFiを開始する
   xQueueSend(xQueueConnectWiFi, NULL, portMAX_DELAY);
+
+  // delete loop
+  vTaskDelete(NULL);
 }
 
 void loop() {}
