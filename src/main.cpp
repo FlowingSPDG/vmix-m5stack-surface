@@ -114,27 +114,27 @@ static void TaskShowTally(void *pvParameters) {
       case Tally::SAFE:
         sprite.fillSprite(TFT_BLACK);
         sprite.setTextColor(TFT_WHITE);
-        sprite.drawCentreString("SAFE", sprite.width()/2, sprite.height()/2, 5);
+        sprite.drawCentreString("SAFE", sprite.width()/2, sprite.height()/2, &fonts::Font4);
         break;
       case Tally::PGM:
         sprite.fillSprite(TFT_RED);
         sprite.setTextColor(TFT_WHITE);
-        sprite.drawCentreString("PGM", sprite.width()/2, sprite.height()/2, 5);
+        sprite.drawCentreString("PGM", sprite.width()/2, sprite.height()/2, &fonts::Font4);
         break;
       case Tally::PRV:
         sprite.fillSprite(TFT_GREEN);
         sprite.setTextColor(TFT_BLACK);
-        sprite.drawCentreString("PRV", sprite.width()/2, sprite.height()/2, 5);
+        sprite.drawCentreString("PRV", sprite.width()/2, sprite.height()/2, &fonts::Font4);
         break;
       case Tally::UNKNOWN:
         sprite.fillSprite(TFT_WHITE);
         sprite.setTextColor(TFT_BLACK);
-        sprite.drawCentreString("UNKNOWN", sprite.width()/2, sprite.height()/2, 5);
+        sprite.drawCentreString("UNKNOWN", sprite.width()/2, sprite.height()/2, &fonts::Font4);
         break;
       case Tally::DISCONNECTED:
         sprite.fillSprite(TFT_DARKGRAY);
         sprite.setTextColor(TFT_WHITE);
-        sprite.drawCentreString("DC", sprite.width()/2, sprite.height()/2, 5);
+        sprite.drawCentreString("DC", sprite.width()/2, sprite.height()/2, &fonts::Font4);
         break;
     }
     sprite.setCursor(0, 0);
@@ -234,7 +234,7 @@ static void IRAM_ATTR onButtonC() {
 static void TaskVMixReceiveClient(void *pvParameters) {
   String data;
 
-  xTaskCreatePinnedToCore(TaskShowTally, "ShowTally", 4096, NULL, 1, &xTaskShowTallyHandle, PRO_CPU_NUM);
+  xTaskCreatePinnedToCore(TaskShowTally, "ShowTally", 4096, NULL, 1, &xTaskShowTallyHandle, APP_CPU_NUM);
 
   while (1) {
     if(!vMixConnected) {
@@ -455,7 +455,7 @@ static void TaskConnectToWiFi(void *pvParameters) {
     delay(5000);
     if(!vMixConnected){
       if (xTaskShowTallyHandle == NULL){
-        xTaskCreatePinnedToCore(TaskShowTally, "ShowTally", 4096, NULL, 1, &xTaskShowTallyHandle, PRO_CPU_NUM);
+        xTaskCreatePinnedToCore(TaskShowTally, "ShowTally", 4096, NULL, 1, &xTaskShowTallyHandle, APP_CPU_NUM);
       }
       Tally SendValue = Tally::DISCONNECTED;
       xQueueSend(xQueueShowTally, &SendValue, portMAX_DELAY);
@@ -735,9 +735,8 @@ static void TaskShowSetingsQRCode(void *pvParameters) {
     delay(300);
     // Fixed IPs
     IPAddress local_IP(192, 168, 4,22);
-    IPAddress gateway(192, 168, 4,9);
     IPAddress subnet(255, 255, 255,0); 
-    if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
+    if (!WiFi.softAPConfig(local_IP, local_IP, subnet)) {
       sprite.println("WiFi AP configuration failed");
       sprite.pushSprite(0, 0);
       continue;
@@ -797,7 +796,7 @@ void setup() {
 
   // tasks
   xTaskCreatePinnedToCore(TaskConnectToWiFi, "ConnectToWiFi", 4096, NULL, 1,NULL, PRO_CPU_NUM);
-  xTaskCreatePinnedToCore(TaskShowSetingsQRCode, "ShowSettingsQRCode", 4096, NULL, 1,NULL, PRO_CPU_NUM);
+  xTaskCreatePinnedToCore(TaskShowSetingsQRCode, "ShowSettingsQRCode", 4096, NULL, 1,NULL, APP_CPU_NUM);
   xTaskCreatePinnedToCore(TaskShowSettings, "ShowSettings", 4096, NULL, 1,NULL, APP_CPU_NUM);
   xTaskCreatePinnedToCore(TaskShowTallySet, "ChangeSettings", 4096, NULL, 1,NULL, APP_CPU_NUM);
   
